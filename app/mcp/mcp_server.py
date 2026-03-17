@@ -142,9 +142,11 @@ async def schedule_appointment(
     logger.info(f"[MCP] schedule_appointment | patient={first_name} {middle_name} {last_name}")
     
     try:
-        # Parse dates
+        # Parse dates — keep as naive IST datetime, no UTC conversion
         bdate = datetime.fromisoformat(birth_date) if "T" in birth_date else datetime.strptime(birth_date, "%Y-%m-%d")
-        appt_dt = datetime.fromisoformat(slot_datetime.replace("Z", "+00:00"))
+        # Strip Z or timezone info to keep as naive local (IST) datetime
+        slot_dt_clean = slot_datetime.replace("Z", "").split("+")[0]
+        appt_dt = datetime.fromisoformat(slot_dt_clean)
         
         # Build request
         request = HMISService.build_appointment_request(

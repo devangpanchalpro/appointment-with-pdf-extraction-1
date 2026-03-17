@@ -56,6 +56,21 @@ class AppointmentScheduleRequest(BaseModel):
     patient: Patient
     appointmentDetail: AppointmentDetail
 
+    def model_dump(self, **kwargs) -> dict:
+        """Override to ensure datetime is serialized as IST string (no Z suffix)."""
+        data = super().model_dump(**kwargs)
+        # Ensure appointentDateTime is naive ISO string (no timezone offset / Z)
+        appt = data.get("appointmentDetail", {})
+        dt_val = appt.get("appointentDateTime")
+        if hasattr(dt_val, "isoformat"):
+            appt["appointentDateTime"] = dt_val.strftime("%Y-%m-%dT%H:%M:%S")
+        # Also handle birthDate in patient
+        patient = data.get("patient", {})
+        bd = patient.get("birthDate")
+        if hasattr(bd, "isoformat"):
+            patient["birthDate"] = bd.strftime("%Y-%m-%dT%H:%M:%S")
+        return data
+
 
 # ── Doctor Availability Response ──────────────────────────────────────────────
 
