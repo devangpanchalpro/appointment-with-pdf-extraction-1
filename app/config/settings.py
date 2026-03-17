@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 2048
 
+    # Timeout for Ollama LLM requests (seconds)
+    OLLAMA_TIMEOUT: int = 180
+
     # External Hospital API — replace with your real API
     EXTERNAL_API_BASE_URL_DEV: str = "https://dev-hmis-api.aarogya.one/api/v1"
     EXTERNAL_API_BASE_URL_PROD: str = "https://beta-hmis.aarogya.one/api/v1"

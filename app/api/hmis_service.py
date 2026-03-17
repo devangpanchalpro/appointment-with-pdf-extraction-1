@@ -1,5 +1,8 @@
 """
-HMIS API Service — Fully dynamic, no static patient data
+HMIS API Service — Fully dynamic, no static patient data.
+
+NOTE: appointentDateTime must already be in UTC when passed to schedule_appointment().
+      The IST → UTC conversion (−5 h 30 m) is performed in agent.py before calling here.
 """
 import logging
 from typing import List, Dict, Any, Optional
@@ -32,17 +35,18 @@ class HMISService:
         health_professional_id: str,
         facility_id: str,
         chief_complaints: List[str],
-        appointment_date_time: datetime,
+        appointment_date_time: datetime,   # ← must be UTC already
         pin_code: str = "",
         address: str = "",
         area: str = "",
         external_id: Optional[str] = None,
     ) -> AppointmentScheduleRequest:
         """Build AppointmentScheduleRequest from patient and appointment data."""
+
         bd_comp = BirthDateComponent(
-            year=birth_date.year,
-            month=birth_date.month,
-            day=birth_date.day,
+            year  = birth_date.year,
+            month = birth_date.month,
+            day   = birth_date.day,
         )
 
         patient = Patient(
@@ -72,10 +76,13 @@ class HMISService:
             healthProfessionalId = health_professional_id,
             facilityId           = facility_id,
             chiefComplaints      = chief_complaints,
-            appointentDateTime   = appointment_date_time,
+            appointentDateTime   = appointment_date_time,  # UTC
         )
 
-        return AppointmentScheduleRequest(patient=patient, appointmentDetail=appointment_detail)
+        return AppointmentScheduleRequest(
+            patient           = patient,
+            appointmentDetail = appointment_detail,
+        )
 
     async def get_doctors_availability(
         self,
@@ -84,11 +91,12 @@ class HMISService:
         to_date: Optional[str] = None,
         health_professional_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        """Delegate to the API client."""
         return await aarogya_api.get_doctors_availability(
-            facility_id=facility_id,
-            from_date=from_date,
-            to_date=to_date,
-            health_professional_id=health_professional_id,
+            facility_id            = facility_id,
+            from_date              = from_date,
+            to_date                = to_date,
+            health_professional_id = health_professional_id,
         )
 
     async def schedule_appointment(
@@ -101,7 +109,7 @@ class HMISService:
         health_professional_id: str,
         facility_id: str,
         chief_complaints: List[str],
-        appointment_date_time: datetime,
+        appointment_date_time: datetime,   # ← UTC, converted by caller
         middle_name: str = "",
         pin_code: str = "",
         address: str = "",
@@ -110,22 +118,27 @@ class HMISService:
     ) -> Dict[str, Any]:
 
         request = self.build_appointment_request(
-            first_name=first_name,
-            middle_name=middle_name,
-            last_name=last_name,
-            mobile=mobile,
-            gender=gender,
-            birth_date=birth_date,
-            health_professional_id=health_professional_id,
-            facility_id=facility_id,
-            chief_complaints=chief_complaints,
-            appointment_date_time=appointment_date_time,
-            pin_code=pin_code,
-            address=address,
-            area=area,
-            external_id=external_id,
+            first_name             = first_name,
+            middle_name            = middle_name,
+            last_name              = last_name,
+            mobile                 = mobile,
+            gender                 = gender,
+            birth_date             = birth_date,
+            health_professional_id = health_professional_id,
+            facility_id            = facility_id,
+            chief_complaints       = chief_complaints,
+            appointment_date_time  = appointment_date_time,
+            pin_code               = pin_code,
+            address                = address,
+            area                   = area,
+            external_id            = external_id,
         )
-        logger.info(f"Scheduling for {first_name} {last_name} with Dr. {health_professional_id}")
+
+        logger.info(
+            f"[HMIS] Scheduling appointment for {first_name} {last_name} "
+            f"with healthProfessionalId={health_professional_id} "
+            f"at {appointment_date_time.isoformat()} UTC"
+        )
         return await aarogya_api.schedule_appointment(request)
 
 

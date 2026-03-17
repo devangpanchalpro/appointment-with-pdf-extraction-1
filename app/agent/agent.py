@@ -1,12 +1,18 @@
 """
 Medical Appointment Booking Agent
 LLM-powered info extraction + Dynamic booking via Aarogya HMIS API
+
+Fixes applied:
+  1. NO auto-select: doctor/slot only stored when user explicitly picks by number
+  2. Doctor list is always fetched dynamically from /doctors/availability
+  3. Only user-chosen values (by index) are stored in session
+  4. appointentDateTime sent to API = user-selected time MINUS 5h30m (IST→UTC)
 """
 import json
 import re
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -43,15 +49,22 @@ SYMPTOM_DEPARTMENT_MAP = {
     "rash":       ["Dermatology"],
 }
 
+FORBIDDEN_NAMES = {
+    "i", "me", "my", "mine", "myself",
+    "hu", "mane", "hun", "ame", "mara", "maru", "mujhe", "muze", "mera", "meri",
+    "and", "the", "a", "an",
+    "dr", "mrs", "mr", "ms", "doc", "doctor",  # Titles and honorifics
+}
+
 
 def filter_doctors_by_symptoms(doctors: List[Dict], symptoms: List[str]) -> List[Dict]:
     if not symptoms:
         return doctors
-    relevant_depts = set()
+    relevant_depts: set = set()
     for symptom in symptoms:
         for key, depts in SYMPTOM_DEPARTMENT_MAP.items():
             if key in symptom.lower():
-                relevant_depts.update([d.lower() for d in depts])
+                relevant_depts.update(d.lower() for d in depts)
     if not relevant_depts:
         return doctors
     filtered = [
@@ -64,39 +77,113 @@ def filter_doctors_by_symptoms(doctors: List[Dict], symptoms: List[str]) -> List
 # ── Doctor display ────────────────────────────────────────────────────────────
 
 def format_doctors_for_display(doctors: List[Dict]) -> str:
+    """Format doctor(s) and slots for display showing all dates and from-to times with numbering."""
     if not doctors:
-        return "No doctors available right now."
-    
-    from datetime import datetime
-    now = datetime.now()
-    today_str = now.strftime("%Y-%m-%d")
-    current_time_str = now.strftime("%H:%M")
-    
+        return "(No doctors available)"
+
+    # Group doctors by name
+    grouped: Dict[str, Dict] = {}
+    for d in doctors:
+        name = d.get("healthProfessionalName", "Dr. Unknown")
+        dept = d.get("department", "General")
+        key = f"{name} ({dept})"
+        if key not in grouped:
+            grouped[key] = {"name": name, "dept": dept, "entries": []}
+        grouped[key]["entries"].append(d)
+
     lines = []
-    for i, doc in enumerate(doctors, 1):
-        name  = doc.get("healthProfessionalName", "Unknown")
-        dept  = doc.get("department", "")
-        date  = doc.get("appointmentDate", "")
-        lines.append(f"\n{i}. Dr. {name} ({dept}) — {date}")
-        slot_num = 1
-        for sched in doc.get("schedule", []):
-            session_name   = sched.get("session", "")
-            available_slots = [s for s in sched.get("slots", []) if s.get("isAvailable", False)]
+    # Build a list of all available slots with sequential global indices
+    all_slots = []
+    for d in doctors:
+        all_slots.extend(_flatten_available_slots(d))
+
+    # Helper to find global index while iterating grouping
+    def get_index(s: Dict) -> int:
+        try:
+            return all_slots.index(s) + 1
+        except ValueError:
+            return 0
+
+    for key, info in grouped.items():
+        lines.append(f"👨‍⚕️ **Doctor: {info['name']}** ({info['dept']})")
+        for entry in info["entries"]:
+            date = str(entry.get("appointmentDate", "???"))
+            lines.append(f"  📅 Date: {date}")
             
-            # Filter out past slots if appointment date is today
-            if date == today_str:
-                available_slots = [
-                    s for s in available_slots 
-                    if s.get("from", "") > current_time_str
-                ]
-            
-            if available_slots:
-                lines.append(f"   [{session_name}]")
-                for slot in available_slots[:5]:
-                    lines.append(f"     Slot {slot_num}: {slot.get('from','')} - {slot.get('to','')}")
-                    slot_num += 1
-    lines.append("\nReply with: doctor number + slot number  (e.g. '1 2' or 'doctor 1 slot 2')")
-    return "\n".join(lines)
+            slots = _flatten_available_slots(entry)
+            if slots:
+                for slot in slots:
+                    idx = get_index(slot)
+                    s_from = str(slot.get("from") or slot.get("startTime") or "??")
+                    s_to = str(slot.get("to") or slot.get("endTime") or "??")
+                    lines.append(f"    {idx}. {s_from} - {s_to}")
+            else:
+                lines.append("    (No available slots)")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+# ── Slot helpers ──────────────────────────────────────────────────────────────
+
+def _flatten_available_slots(doc: Dict) -> List[Dict]:
+    """Return a flat list of all available slots for a doctor entry."""
+    slots: List[Dict] = []
+    for sched in doc.get("schedule", []):
+        for s in sched.get("slots", []):
+            avail = s.get("isAvailable")
+            if avail is True or str(avail).lower() == "true":
+                slots.append(s)
+    return slots
+
+
+def _slot_external_id(slot: Dict, doc: Dict) -> str:
+    """
+    Return the best available external ID for a slot.
+    Tries: externalId → slotId → id → synthetic fallback.
+    """
+    ext = slot.get("externalId") or slot.get("slotId") or slot.get("id")
+    if ext:
+        return str(ext)
+    s_from = (slot.get("from") or slot.get("startTime") or "").replace(":", "")
+    s_to   = (slot.get("to")   or slot.get("endTime")   or "").replace(":", "")
+    return f"slot_{s_from}_{s_to}"
+
+
+# ── Context / missing fields ──────────────────────────────────────────────────
+
+REQUIRED_PATIENT_FIELDS = [
+    "firstName", "lastName",
+    "mobile", "gender", "address",
+]
+
+
+def missing_patient_fields(collected: Dict) -> List[str]:
+    missing: List[str] = []
+
+    for k in REQUIRED_PATIENT_FIELDS:
+        val = collected.get(k)
+        if not val or str(val).strip() in ("", "null"):
+            missing.append(k)
+            continue
+        if k in ("firstName", "lastName"):
+            v = str(val).strip()
+            if v.lower() in FORBIDDEN_NAMES or len(v) < 2:
+                missing.append(k)
+        if k == "mobile":
+            if not re.match(r"^\d{10}$", str(val).replace(" ", "")):
+                missing.append(k)
+
+    # Need either birthDate OR age
+    if not collected.get("birthDate") and not collected.get("age"):
+        missing.append("dateOfBirth (DD/MM/YYYY) or age")
+
+    return missing
+
+
+def build_context_summary(collected: Dict) -> str:
+    filled = {k: v for k, v in collected.items() if v is not None and str(v).strip() not in ("", "[]")}
+    return "\n".join(f"  {k}: {v}" for k, v in filled.items()) if filled else "Nothing collected yet."
 
 
 # ── Session Manager ───────────────────────────────────────────────────────────
@@ -108,10 +195,11 @@ class SessionManager:
     def get(self, sid: str) -> Dict:
         if sid not in self._sessions:
             self._sessions[sid] = {
-                "messages": [],
+                "messages":  [],
                 "collected": CollectedInfo().model_dump(),
                 "doctors":   [],
-                "stage":     "start",   # start → doctors_shown → selected → booking
+                # stages: start → doctors_shown → doctor_chosen → selected → booking
+                "stage":     "start",
                 "booked":    False,
             }
         return self._sessions[sid]
@@ -124,28 +212,10 @@ class SessionManager:
 
     def update_collected(self, sid: str, updates: Dict):
         collected = self.get(sid)["collected"]
-        def snake_to_camel(s: str) -> str:
-            parts = s.split("_")
-            return parts[0] + ''.join(p.title() for p in parts[1:]) if len(parts) > 1 else s
-
-        def camel_to_snake(s: str) -> str:
-            return re.sub(r'(?<!^)(?=[A-Z])', '_', s).lower()
-
         for k, v in updates.items():
-            # Ignore empty updates
             if v is None or v == "" or v == []:
                 continue
-
-            # Always write the provided key if present in collected, else still write it to collected
             collected[k] = v
-
-            # Also write normalized variants so both naming styles exist
-            if "_" in k:
-                camel = snake_to_camel(k)
-                collected[camel] = v
-            else:
-                snake = camel_to_snake(k)
-                collected[snake] = v
 
     def collected(self, sid: str) -> Dict:
         return self.get(sid)["collected"]
@@ -157,201 +227,59 @@ class SessionManager:
 session_manager = SessionManager()
 
 
-# ── Doctor/Slot selection detector ───────────────────────────────────────────
-
-def detect_doctor_slot_selection(message: str, doctors: List[Dict]) -> Optional[Dict]:
-    """
-    Parses messages like:
-      "doctor 1 slot 2", "1 2", "dr 2 slot 1", "choose doctor 1 and slot 3"
-    Returns {"doctor": doc_dict, "slot": slot_dict} or None.
-    """
-    if not doctors:
-        return None
-
-    msg_lower = message.lower()
-    numbers = re.findall(r'\b(\d+)\b', message)
-
-    # Two bare numbers → first = doctor index, second = slot index
-    if len(numbers) >= 2:
-        doc_idx  = int(numbers[0]) - 1
-        slot_idx = int(numbers[1]) - 1
-        if 0 <= doc_idx < len(doctors):
-            doc = doctors[doc_idx]
-            all_slots = _flatten_available_slots(doc, filter_today_future=True)
-            if 0 <= slot_idx < len(all_slots):
-                return {"doctor": doc, "slot": all_slots[slot_idx]}
-
-    # Doctor by name
-    for doc in doctors:
-        name = doc.get("healthProfessionalName", "").lower()
-        if name and name in msg_lower:
-            slot_match = re.search(r'slot\s*(\d+)', msg_lower)
-            if slot_match:
-                slot_idx  = int(slot_match.group(1)) - 1
-                all_slots = _flatten_available_slots(doc, filter_today_future=True)
-                if 0 <= slot_idx < len(all_slots):
-                    return {"doctor": doc, "slot": all_slots[slot_idx]}
-
-    return None
-
-
-def _flatten_available_slots(doc: Dict, filter_today_future: bool = False) -> List[Dict]:
-    from datetime import datetime
-    slots = []
-    for sched in doc.get("schedule", []):
-        for s in sched.get("slots", []):
-            if s.get("isAvailable", False):
-                slots.append(s)
-    
-    # Filter out past slots if appointment date is today and filter_today_future is True
-    if filter_today_future:
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-        current_time_str = now.strftime("%H:%M")
-        
-        appointment_date = doc.get("appointmentDate", "")
-        if appointment_date == today_str:
-            slots = [s for s in slots if s.get("from", "") > current_time_str]
-    
-    return slots
-
-
-def find_doctor_by_name(doctor_name: str, doctors: List[Dict]) -> Optional[Dict]:
-    """
-    Find doctor by name (fuzzy matching).
-    Handles "Dr. Sharma", "Sharma", "sharma", etc.
-    """
-    if not doctor_name or not doctors:
-        return None
-    
-    name_lower = doctor_name.lower().replace("dr.", "").strip()
-    
-    for doc in doctors:
-        doc_name = doc.get("healthProfessionalName", "").lower()
-        # Check if the extracted name is part of doctor's name
-        if name_lower in doc_name or doc_name in name_lower:
-            return doc
-    
-    return None
-
-
-def select_slot_by_time(doctor: Dict, appointment_slot: str) -> Optional[Dict]:
-    """
-    Select a slot matching the appointment_slot string.
-    Handles "10am", "2:30pm", "morning", "afternoon", "evening", "tomorrow 5pm", etc.
-    """
-    if not doctor or not appointment_slot:
-        return None
-    
-    slot_lower = appointment_slot.lower().strip()
-    all_slots = _flatten_available_slots(doctor, filter_today_future=True)
-    
-    if not all_slots:
-        return None
-    
-    # Try exact time match (10:00, 10am, 2:30pm, etc.)
-    time_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', slot_lower)
-    if time_match:
-        hh = int(time_match.group(1))
-        mm = int(time_match.group(2) or 0)
-        ampm = time_match.group(3)
-        if ampm == 'pm' and hh != 12:
-            hh += 12
-        if ampm == 'am' and hh == 12:
-            hh = 0
-        time_str = f"{hh:02d}:{mm:02d}"
-        
-        for s in all_slots:
-            s_from = (s.get('from') or s.get('startTime') or '').strip().lower()
-            if time_str in s_from:
-                return s
-    
-    # Try time preferences (morning, afternoon, evening)
-    prefer = None
-    if 'morning' in slot_lower:
-        prefer = 'morning'
-    elif 'afternoon' in slot_lower:
-        prefer = 'afternoon'
-    elif 'evening' in slot_lower:
-        prefer = 'evening'
-    
-    if prefer:
-        for s in all_slots:
-            s_from = (s.get('from') or s.get('startTime') or '').strip().lower()
-            try:
-                h = int(s_from.split(':')[0])
-            except:
-                h = None
-            
-            if prefer == 'morning' and h is not None and 6 <= h < 12:
-                return s
-            elif prefer == 'afternoon' and h is not None and 12 <= h < 17:
-                return s
-            elif prefer == 'evening' and h is not None and 17 <= h < 22:
-                return s
-    
-    # Fallback to first available slot
-    return all_slots[0] if all_slots else None
-
-
-# ── Context summary ───────────────────────────────────────────────────────────
-
-def build_context_summary(collected: Dict) -> str:
-    filled = {k: v for k, v in collected.items() if v is not None and v != "" and v != []}
-    if not filled:
-        return "Nothing collected yet."
-    return "\n".join(f"  {k}: {v}" for k, v in filled.items())
-
-
-# ── Missing field checker ─────────────────────────────────────────────────────
-
-REQUIRED_PATIENT_FIELDS = [
-    "firstName", "lastName", "mobile", "gender", "pinCode", "address", "area"
-]
-
-
-def missing_patient_fields(collected: Dict) -> List[str]:
-    missing = [k for k in REQUIRED_PATIENT_FIELDS if not collected.get(k)]
-    # Need either birthDate OR age
-    if not collected.get("birthDate") and not collected.get("age"):
-        missing.append("dateOfBirth (DD/MM/YYYY) or age")
-    return missing
-
-
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a Medical Appointment Booking Agent for Aarogya hospital.
-Help patients book appointments through natural, friendly conversation.
+Your ONLY job is to display available time slots and collect patient details.
 
-## FLOW:
-1. User mentions symptoms → you show available doctors with slots
-2. User picks doctor + slot (e.g. "doctor 1 slot 2")
-3. You ask for all patient details in ONE go:
-   "Please share: full name (first middle last), mobile, gender, date of birth or age, full address, pincode, area"
-4. User replies naturally — you extract all info from their message
-5. When all info collected → confirm and book automatically
+## IF SHOWING SLOTS:
+The system provides doctor details and available time slots below.
+You MUST copy this list EXACTLY — no reformatting.
+Then ask user to select by typing numbers.
+
+## HOW TO RESPOND:
+
+{selection_instruction}
+
+## CRITICAL RULES:
+- Show the date/slot list EXACTLY as provided — never reformat.
+- Do NOT suggest or recommend a time slot.
+- Do NOT auto-select anything.
+- Keep your response brief and clear.
 
 ## CURRENT SESSION STATE:
 {context}
 
-## MISSING FIELDS (still needed before booking):
+## MISSING PATIENT FIELDS:
 {missing}
 
-## RULES:
-- Do NOT re-ask fields already in session state above
-- If missing fields is empty AND doctor is selected → booking will happen automatically
-- Emergency (severe chest pain, unconscious) → tell user to call 108 immediately
-- Do NOT diagnose — only help book appointments
-- Reply in same language as user (Gujarati / Hindi / English)
+## SLOTS TO SHOW:
+{doctor_list}
+
+{selection_instruction}
+
+## WHEN ALL PATIENT DETAILS COLLECTED:
+Return this EXACT format at the very end:
+"Perfect! I'm booking your appointment:
+- Doctor: [doctor name]
+- Date: [date]
+- Time: [time]
+- Patient Name: [firstName middleName lastName]
+- Contact Number: [mobile]
+- Date of Birth: [birthDate]
+- Address: [address]
+- Pin Code: [pinCode]
+
+Processing complete!"
 """
 
-EXTRACTION_PROMPT = """You are a strict JSON extraction assistant.
+EXTRACTION_PROMPT = """You are a strict JSON extraction assistant focused on PATIENT data only.
 
-Extract information from the text below.
-Return ONLY a valid JSON object. No explanation, no markdown, no extra text.
+Extract information from user text below.
+Return ONLY a valid JSON object — no markdown, no explanation, nothing else.
 
 Fields to extract:
-{
+{{
   "firstName":  string or null,
   "middleName": string or null,
   "lastName":   string or null,
@@ -363,35 +291,59 @@ Fields to extract:
   "address":    string or null,
   "area":       string or null,
   "symptoms":   ["symptom1", "symptom2"] or null,
-  "doctor_name": string (with "Dr." if mentioned) or null,
-  "appointment_slot": string (e.g., "10am", "14:30", "tomorrow 5pm") or null
-}
+  "doctor_name": string or null,
+  "appointment_date": "YYYY-MM-DD" or null,
+  "appointment_time": "HH:MM" or null
+}}
 
-Rules:
-- Name: Parse full name carefully. For Indian names, typically: firstName (given name), middleName (father's name), lastName (surname/family name)
-  - If 1 word: firstName only
-  - If 2 words: firstName + lastName
-  - If 3 words: firstName + middleName + lastName
-  - If 4+ words: firstName + middleName + combine rest as lastName
-  - Example: "panchal devang hasmukhbhai" → firstName="panchal", middleName="devang", lastName="hasmukhbhai"
-  - Do NOT duplicate any part of the name
-- mobile: exactly 10 digits (Indian number), no spaces or dashes
-- gender: "Male" or "Female" or null. Map variants: male/M/purush/male to "Male", female/F/stri/female to "Female". Do not infer from name.
-- birthDate: convert any date format to YYYY-MM-DD; if only age given, set birthDate to null
-- age: integer years only (e.g. "21 years old" → 21, "21" → 21)
-- pinCode: exactly 6 digits, no spaces
-- address: house/street/building address (NOT the area/locality name)
-- area: locality/village/neighbourhood name (e.g. Kathwada, Navrangpura)
-- symptoms: list of health complaints mentioned (e.g., ["fever", "cough"])
-- doctor_name: extract doctor's name as mentioned (include "Dr." if present, e.g., "Dr. Sharma")
-- appointment_slot: extract time/slot as mentioned (e.g., "10am", "2:30pm", "tomorrow 5pm")
-- Return ONLY the JSON, no extra text
+CRITICAL RULES:
+
+⚠️  PATIENT vs DOCTOR SEPARATION:
+  - If user mentions ONLY a doctor name (e.g., "I want to see Dr. Dhruv Barot"):
+    → Extract ONLY doctor_name="Dr. Dhruv Barot"
+    → Set firstName, middleName, lastName, mobile, etc. to NULL
+  - If user gives PATIENT details (e.g., "My name is Rahul Patel"):
+    → Extract firstName, middleName, lastName from PATIENT info ONLY
+    → NEVER extract doctor titles (Dr, Mrs, Mr) as patient names
+    → NEVER extract doctor names into patient fields
+
+⚠️  NAME EXTRACTION:
+  - NEVER include titles: "Dr", "Mrs", "Mr", "Ms", "Doctor"
+  - NEVER extract pronouns: "I", "me", "my", "hu", "mane", "mera"
+  - If text is "Dr. Dhruv Barot" alone → doctor_name ONLY, patient names = null
+  - If text is "I am Rahul Sharma" → firstName="Rahul", lastName="Sharma" (NOT "I")
+
+⚠️  OTHER RULES:
+  - Extract the exact requested appointment date/time. E.g., "18:00" -> appointment_time: "18:00"
+  - For symptoms: extract ONLY health complaints (e.g., "chest pain", "fever")
+  - mobile: exactly 10 digits, no spaces/dashes
+  - gender: only "Male" or "Female" or null
+  - birthDate: YYYY-MM-DD or null
+  - pinCode: exactly 6 digits or null
+
+Name parsing (for patient names ONLY):
+  - 1 word → firstName
+  - 2 words → firstName + lastName
+  - 3 words → firstName + middleName + lastName  
+  - 4+ words → firstName + middleName + (rest as lastName)
+
+Return ONLY the JSON object, nothing else.
 
 Current year: {year}
 
-Text:
+User text:
 \"\"\"{text}\"\"\"
 """
+
+
+# ── IST → UTC conversion ──────────────────────────────────────────────────────
+
+IST_OFFSET = timedelta(hours=5, minutes=30)
+
+
+def ist_to_utc(dt: datetime) -> datetime:
+    """Convert an IST datetime to UTC by subtracting 5 h 30 m."""
+    return dt - IST_OFFSET
 
 
 # ── The Agent ─────────────────────────────────────────────────────────────────
@@ -411,30 +363,33 @@ class AppointmentAgent:
             },
         }
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            timeout = httpx.Timeout(settings.OLLAMA_TIMEOUT, connect=10)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload)
                 r.raise_for_status()
                 return r.json()["message"]["content"]
         except httpx.ConnectError:
             return "⚠️ Cannot connect to Ollama. Please ensure Ollama is running."
+        except httpx.ReadTimeout:
+            return "⚠️ Ollama timed out. Please try again."
         except Exception as e:
-            logger.error(f"LLM error: {e}")
-            return "Sorry, something went wrong. Please try again."
+            logger.error(f"LLM error: {e}", exc_info=True)
+            return f"Sorry, something went wrong. Error: {e}"
+        return "Sorry, something went wrong."
 
-    # ── LLM-based patient info extractor ─────────────────────────────────────
+    # ── Patient info extractor ────────────────────────────────────────────────
 
-    async def _extract_patient_info(self, text: str) -> Dict:
+    async def _extract_patient_info(self, text: str, dr_name: str = "") -> Dict:
         """
-        Uses LLM to extract patient data from ANY natural language.
-        Works for mixed Gujarati/Hindi/English.
-        Example:
-          "my name is panchal devangbhai hasmukhbhai and i leave in kathwada 382430
-           and my contact is 8511274939 and i am 21 years old Male"
-        →  {firstName: panchal, middleName: devangbhai, lastName: hasmukhbhai,
-            mobile: 8511274939, gender: 1, age: 21, pinCode: 382430, area: kathwada}
+        Use LLM to extract patient data from any natural language input.
+        Works for mixed Gujarati / Hindi / English.
+        Does NOT extract doctor/slot selection — that is handled by explicit index parsing.
         """
-        # Use simple replace to avoid .format() interpreting braces inside the JSON snippet
-        prompt = EXTRACTION_PROMPT.replace("{year}", str(datetime.now().year)).replace("{text}", text)
+        prompt = (
+            EXTRACTION_PROMPT
+            .replace("{year}", str(datetime.now().year))
+            .replace("{text}", text)
+        )
         payload = {
             "model":   settings.LLM_MODEL,
             "messages": [
@@ -445,480 +400,402 @@ class AppointmentAgent:
             "options": {"temperature": 0.0, "num_predict": 512},
         }
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            timeout = httpx.Timeout(settings.OLLAMA_TIMEOUT, connect=10)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(f"{settings.OLLAMA_BASE_URL}/api/chat", json=payload)
                 r.raise_for_status()
                 raw = r.json()["message"]["content"].strip()
-                # Robustly find JSON even if LLM adds extra text
-                m = re.search(r'\{.*\}', raw, re.DOTALL)
-                if m:
-                    data = json.loads(m.group())
-                    logger.info(f"[Extraction] Result: {data}")
-                    # Process gender
-                    if 'gender' in data and data['gender']:
-                        if data['gender'].lower() == 'male':
-                            data['gender'] = 1
-                        elif data['gender'].lower() == 'female':
-                            data['gender'] = 2
-                        else:
-                            data['gender'] = None
-                    # Store doctor_name and appointment_slot for auto-matching
-                    # Don't remove them - let the booking logic use them
-                    return data
+
+            data = self._parse_json_safe(raw)
+            if not data:
+                return {}
+
+            logger.info(f"[Extraction] raw result: {data}")
+            data = self._clean_extracted_data(data, dr_name)
+            return data
+        except httpx.ConnectError:
+            logger.error("[Extraction] Cannot connect to Ollama.")
+            return {}
+        except httpx.ReadTimeout:
+            logger.error("[Extraction] Ollama timed out.")
+            return {}
         except Exception as e:
-            logger.error(f"[Extraction] Failed: {e}")
+            logger.error(f"[Extraction] Failed: {e}", exc_info=True)
+            return {}
+
+    @staticmethod
+    def _parse_json_safe(text: str) -> Dict:
+        """Try multiple strategies to extract a JSON object from LLM output."""
+        # 1. Direct parse
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        # 2. Balanced-braces extraction
+        start = text.find("{")
+        if start != -1:
+            depth = 0
+            for i in range(start, len(text)):
+                if text[i] == "{":
+                    depth += 1
+                elif text[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start: i + 1])
+                        except Exception:
+                            break
+        # 3. Non-greedy regex
+        m = re.search(r"\{.*?\}", text, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group())
+            except Exception:
+                pass
+        logger.error(f"[Extraction] Could not parse JSON: {text[:200]}")
         return {}
+
+    @staticmethod
+    def _clean_extracted_data(data: Dict, locked_dr_name: str = "") -> Dict:
+        """Validate and clean extracted fields."""
+        dr_name_text = str(data.get("doctor_name", "")).lower().replace("dr.", "").strip()
+        locked_dr_low = locked_dr_name.lower().replace("dr.", "").strip()
+
+        # Clean patient name fields
+        for field in ("firstName", "middleName", "lastName"):
+            val = data.get(field)
+            if val:
+                v = str(val).strip()
+                v_low = v.lower()
+                # If name matches selected doctor or is too generic or matches "doctor_name" extracted, ignore it
+                if len(v) < 2 or v_low in FORBIDDEN_NAMES:
+                    data[field] = None
+                elif locked_dr_low and (locked_dr_low in v_low) and len(v) > 3:
+                    data[field] = None  # doctor name leaked into patient field
+                elif dr_name_text and (dr_name_text in v_low) and len(v) > 3:
+                    data[field] = None  # doctor name leaked into patient field
+                elif v_low in ("dr", "mrs", "mr", "ms", "doc", "doctor"):
+                    data[field] = None  # Title, not a patient name
+
+        # Normalise gender to int
+        g = data.get("gender")
+        if g:
+            gs = str(g).lower()
+            if "female" in gs or "stri" in gs:
+                data["gender"] = 2
+            elif "male" in gs or "purush" in gs:
+                data["gender"] = 1
+            else:
+                try:
+                    data["gender"] = int(g) if int(g) in (1, 2) else None
+                except Exception:
+                    data["gender"] = None
+
+        return data
 
     # ── Booking ───────────────────────────────────────────────────────────────
 
     async def _book_appointment(
-        self, session_id: str, session: Dict, c: Dict
+        self, session_id: str, session: Dict, collected: Dict
     ) -> Tuple[bool, Optional[Dict], str]:
         """
-        Build complete AppointmentScheduleRequest from collected data and POST to API.
-        Returns (success, booking_data, message_to_append).
+        Build the HMIS booking request from collected data and call the API.
+        The appointment datetime sent to the API = user-selected IST time − 5 h 30 m (UTC).
         """
+        from app.api.hmis_service import hmis_service
+
         try:
-            # ── Birth date ────────────────────────────────────────────────────
-            bd_raw = c.get("birthDate")
-            if not bd_raw or bd_raw == 'null' or bd_raw == '':
-                age = int(c.get("age", 25))
-                approx_year = datetime.now().year - age
-                bd_raw = f"{approx_year}-01-01"
-            try:
-                birth_dt = datetime.fromisoformat(bd_raw)
-            except ValueError:
-                try:
-                    birth_dt = datetime.strptime(bd_raw, "%Y-%m-%d")
-                except ValueError:
-                    # If still invalid, use age fallback
-                    age = int(c.get("age", 25))
-                    approx_year = datetime.now().year - age
-                    birth_dt = datetime(approx_year, 1, 1)
+            # ── Resolve birth_date ────────────────────────────────────────────
+            birth_date_str = collected.get("birthDate")
+            age            = collected.get("age")
 
-            # ── Patient ───────────────────────────────────────────────────────
-            patient = Patient(
-                firstName  = c.get("firstName", ""),
-                middleName = c.get("middleName", ""),
-                lastName   = c.get("lastName", ""),
-                mobile     = c.get("mobile", ""),
-                gender     = c.get("gender", 1),
-                birthDate  = birth_dt,
-                birthDateComponent = BirthDateComponent(
-                    year=birth_dt.year, month=birth_dt.month, day=birth_dt.day
-                ),
-                healthId      = "",
-                healthAddress = "",
-                patientDetail = PatientDetail(
-                    permanentAddress=PermanentAddress(
-                        pinCode = c.get("pinCode", ""),
-                        address = c.get("address", ""),
-                        area    = c.get("area", ""),
-                    )
-                ),
+            if birth_date_str:
+                birth_date = datetime.strptime(str(birth_date_str), "%Y-%m-%d")
+            elif age:
+                birth_date = datetime(datetime.now().year - int(age), 1, 1)
+            else:
+                return False, None, "\n❌ Booking failed: date of birth or age is required."
+
+            # ── Resolve appointment datetime (IST) ────────────────────────────
+            appt_date_str = collected.get("appointment_date", "")
+            appt_time_str = collected.get("appointment_time", "00:00")
+
+            if not appt_date_str:
+                return False, None, "\n❌ Booking failed: appointment date not set."
+
+            appt_dt_ist = datetime.strptime(
+                f"{appt_date_str} {appt_time_str}", "%Y-%m-%d %H:%M"
             )
 
-            # ── Appointment date/time with UTC conversion ──────────────────────
-            sel_date = c.get("appointment_date", "")
-            sel_time = c.get("appointment_time", "")
-            appt_dt_utc_str = ""
-            try:
-                # Parse local datetime
-                appt_dt_local = datetime.fromisoformat(f"{sel_date}T{sel_time}")
-                # Convert to UTC string for API
-                appt_dt_utc_str = appt_dt_local.isoformat() + "Z"
-                logger.info(f"[Booking] DateTime: Local={sel_date}T{sel_time} → UTC={appt_dt_utc_str}")
-                appt_dt = appt_dt_local
-            except Exception as e:
-                logger.error(f"DateTime parse error: {e}")
-                appt_dt = datetime.now()
-                appt_dt_utc_str = appt_dt.isoformat() + "Z"
-
-            # ── AppointmentDetail ─────────────────────────────────────────────
-            appointment_detail = AppointmentDetail(
-                system               = 1,
-                consultationType     = 1,
-                slotDuration         = 0,
-                externalId           = c.get("slot_external_id") or "",
-                healthProfessionalId = c.get("health_professional_id") or "",
-                facilityId           = c.get("facility_id") or settings.DEFAULT_FACILITY_ID or "",
-                chiefComplaints      = c.get("symptoms") or [],
-                appointentDateTime   = appt_dt,
+            # ── Convert IST → UTC (subtract 5 h 30 m) ────────────────────────
+            appt_dt_utc = ist_to_utc(appt_dt_ist)
+            logger.info(
+                f"[Booking] IST: {appt_dt_ist.isoformat()}  →  UTC: {appt_dt_utc.isoformat()}"
             )
 
-            booking_req = AppointmentScheduleRequest(
-                patient=patient, appointmentDetail=appointment_detail
+            # ── Gender default ────────────────────────────────────────────────
+            gender_val = collected.get("gender")
+            if gender_val is None:
+                gender_val = 1
+            gender_int = int(gender_val)
+
+            # ── Chief complaints from symptoms ────────────────────────────────
+            symptoms = collected.get("symptoms") or []
+            if isinstance(symptoms, str):
+                symptoms = [symptoms]
+            chief_complaints = symptoms if symptoms else ["General consultation"]
+
+            result = await hmis_service.schedule_appointment(
+                first_name              = str(collected.get("firstName", "")),
+                middle_name             = str(collected.get("middleName", "") or ""),
+                last_name               = str(collected.get("lastName", "")),
+                mobile                  = str(collected.get("mobile", "")),
+                gender                  = gender_int,
+                birth_date              = birth_date,
+                health_professional_id  = str(collected.get("health_professional_id", "")),
+                facility_id             = str(collected.get("facility_id", "")),
+                chief_complaints        = chief_complaints,
+                appointment_date_time   = appt_dt_utc,   # ← UTC time sent to API
+                pin_code                = str(collected.get("pinCode", "") or ""),
+                address                 = str(collected.get("address", "") or ""),
+                area                    = str(collected.get("area", "") or ""),
+                external_id             = str(collected.get("slot_external_id", "") or ""),
             )
-
-            # ── Log full request body ─────────────────────────────────────────
-            req_json = booking_req.model_dump_json(indent=2)
-            logger.info(f"BOOKING REQUEST:\n{req_json}")
-            print(f"\n{'='*80}\n🔵 BOOKING REQUEST BODY:\n{'='*80}\n{req_json}\n{'='*80}\n")
-
-            result = await aarogya_api.schedule_appointment(booking_req)
-            print(f"\n{'='*80}\n🟢 API RESPONSE:\n{'='*80}\n{result}\n{'='*80}\n")
 
             if result.get("success"):
-                session["booked"] = True  # Mark as booked to prevent duplicates
-                data    = result.get("data", {})
-                booking_details = {**c, **data}  # Merge collected info with API response
-                appt_id = data.get("appointmentId", "N/A")
-                dr_name = c.get("doctor_name", "your doctor")
+                session["booked"] = True
+                slot_disp = collected.get("slot_display", appt_time_str)
                 msg = (
-                    f"\n\n✅ **Appointment Confirmed!**\n"
-                    f"🆔 Appointment ID : {appt_id}\n"
-                    f"👨‍⚕️ Doctor         : {dr_name}\n"
-                    f"📅 Date            : {sel_date}\n"
-                    f"⏰ Time            : {c.get('slot_display', sel_time)}\n"
-                    f"👤 Patient         : {c.get('firstName','')} {c.get('lastName','')}\n"
-                    f"📞 Mobile          : {c.get('mobile','')}\\n"
-                    f"🕐 UTC DateTime    : {appt_dt_utc_str}"
+                    f"\n\n✅ **Appointment booked successfully!**\n"
+                    f"  Doctor   : Dr. {collected.get('doctor_name', '')}\n"
+                    f"  Date     : {appt_date_str}\n"
+                    f"  Slot     : {slot_disp} (IST)\n"
+                    f"  Patient  : {collected.get('firstName', '')} {collected.get('lastName', '')}\n"
+                    f"  Ref data : {result.get('data', '')}"
                 )
-                logger.info(f"[Booking Success] Appointment ID: {appt_id} | UTC: {appt_dt_utc_str}")
-                return True, booking_details, msg
+                return True, result.get("data"), msg
             else:
                 err = result.get("error", "Unknown error")
                 return False, None, f"\n\n❌ Booking failed: {err}"
 
         except Exception as e:
-            logger.error(f"Booking exception: {e}", exc_info=True)
-            return False, None, f"\n\n❌ Booking failed: {e}"
+            logger.error(f"[Booking] Error: {e}", exc_info=True)
+            return False, None, f"\n\n❌ Booking error: {e}"
 
-    # ── Main chat handler ─────────────────────────────────────────────────────
+    # ── Main chat handler ──────────────────────────────────────────────────────
 
     async def chat(self, session_id: str, user_message: str) -> Dict[str, Any]:
         session   = session_manager.get(session_id)
         collected = session_manager.collected(session_id)
+        logger.info(f"[{session_id}] stage={session['stage']} | user: {user_message[:120]}")
 
-        logger.info(f"[{session_id}] stage={session['stage']} | user: {user_message[:100]}")
+        # ── STEP 1: Extract patient info from user message ────────────────────
+        # This covers names, mobile, gender, dob, address etc.
+        # It does NOT handle doctor/slot selection — that's done by explicit index below.
+        dr_name_locked = collected.get("doctor_name") or ""
+        extracted = await self._extract_patient_info(user_message, dr_name_locked)
+        clean = {k: v for k, v in extracted.items() if v is not None and str(v).strip() != ""}
+        if clean:
+            session_manager.update_collected(session_id, clean)
+            logger.info(f"[Extraction] stored: {clean}")
 
-        msg_lower = user_message.lower()
+        # ── STEP 2: Fetch latest doctor list (from cache, refreshed every 15 min) ──
+        all_docs = await doctors_cache.get_doctors()
 
-        # ── STEP 1: Detect doctor + slot selection ────────────────────────────
-        selection = detect_doctor_slot_selection(user_message, session["doctors"])
-        if selection and session["stage"] in ("doctors_shown", "start"):
-            doc  = selection["doctor"]
-            slot = selection["slot"]
-            logger.info(f"Doctor selected: {doc.get('healthProfessionalName')} | Slot: {slot.get('from')}-{slot.get('to')}")
+        # ── STEP 3: If no doctors in session yet, filter by symptoms/doctor name ──
+        if session["stage"] in ("start", "doctors_shown") and not session.get("_doctor_slot_locked"):
+            collected_now = session_manager.collected(session_id)
+            dr_name   = collected_now.get("doctor_name")
+            symptoms  = collected_now.get("symptoms") or []
 
-            # Determine externalId from slot - prioritize and create unique ID
-            ext_id = slot.get("externalId") or slot.get("slotId") or slot.get("id")
+            filtered: List[Dict] = []
+
+            if dr_name:
+                name_low  = str(dr_name).lower().replace("dr.", "").strip()
+                filtered  = [
+                    d for d in all_docs
+                    if name_low in (d.get("healthProfessionalName") or "").lower()
+                ]
+                logger.info(f"[Filter] by doctor name '{dr_name}': {len(filtered)} entries")
+
+            if not filtered and symptoms:
+                syms = symptoms if isinstance(symptoms, list) else [str(symptoms)]
+                filtered = filter_doctors_by_symptoms(all_docs, syms)
+                logger.info(f"[Filter] by symptoms {syms}: {len(filtered)} entries")
+
+            if not filtered:
+                # Show all doctors if no filter matched
+                filtered = all_docs
+
+            if filtered:
+                session["doctors"] = filtered
+                if session["stage"] == "start":
+                    session["stage"] = "doctors_shown"
+
+        # ── STEP 4: Doctor / Slot matching ────
+        if not session.get("_doctor_slot_locked"):
+            collected_now = session_manager.collected(session_id)
+            ext_dr_name   = collected_now.get("doctor_name")
+            ext_appt_date = collected_now.get("appointment_date")
+            ext_appt_time = collected_now.get("appointment_time")
             
-            # If still no ID, create one from slot data
-            if not ext_id:
-                slot_from = slot.get("from", slot.get("startTime", ""))
-                slot_to = slot.get("to", slot.get("endTime", ""))
-                ext_id = f"slot_{slot_from.replace(':', '')}_{slot_to.replace(':', '')}"
-                logger.info(f"Generated slotId: {ext_id}")
-            
-            session_manager.update_collected(session_id, {
-                "health_professional_id": doc.get("healthProfessionalId", ""),
-                "doctor_name":            doc.get("healthProfessionalName", ""),
-                "facility_id":            doc.get("facilityId") or settings.DEFAULT_FACILITY_ID or "",
-                "appointment_date":       doc.get("appointmentDate", ""),
-                "appointment_time":       slot.get("from", ""),
-                "slot_external_id":       ext_id,
-                "slot_display":           f"{slot.get('from','')} - {slot.get('to','')}",
-            })
-            session["stage"] = "selected"
-
-        # Fallback: user may say "confirm Dr Dhruv Barot" or "conform Dr Dhruv Barot afternoon"
-        # If selection not detected, try to detect explicit confirmation by doctor name
-        if not selection and session["stage"] in ("doctors_shown", "start"):
-            if re.search(r'\b(confirm|conform|book|yes|confirming)\b', user_message.lower()):
-                # try to find a doctor by name mentioned in message
-                found = None
+            # ── 4a. Check if user typed a NUMBER for selection ────────────────
+            digit_match = re.search(r"\b(\d+)\b", user_message)
+            if digit_match:
+                index = int(digit_match.group(1)) - 1
+                all_slots: List[Tuple[Dict, Dict]] = [] # (slot, doc_entry)
                 for d in session.get("doctors", []):
-                    name = (d.get("healthProfessionalName") or d.get("name") or "").lower()
-                    if name and name in user_message.lower():
-                        found = d
-                        break
-
-                if found:
-                    # determine preferred time if mentioned (morning/afternoon/evening) or explicit time
-                    prefer = None
-                    if "afternoon" in user_message.lower():
-                        prefer = "afternoon"
-                    elif "morning" in user_message.lower():
-                        prefer = "morning"
-                    elif "evening" in user_message.lower():
-                        prefer = "evening"
-
-                    # try to extract explicit time like 10:00, 10:00am, 10am
-                    time_match = re.search(r'(\d{1,2})(?::(\d{2}))?\s*(am|pm)?', user_message.lower())
-                    time_str = None
-                    if time_match:
-                        hh = int(time_match.group(1))
-                        mm = int(time_match.group(2) or 0)
-                        ampm = time_match.group(3)
-                        if ampm == 'pm' and hh != 12:
-                            hh += 12
-                        if ampm == 'am' and hh == 12:
-                            hh = 0
-                        time_str = f"{hh:02d}:{mm:02d}"
-
-                    # pick a slot matching preference
-                    all_slots = _flatten_available_slots(found, filter_today_future=True)
-                    chosen_slot = None
-                    if time_str:
-                        for s in all_slots:
-                            s_from = (s.get('from') or s.get('startTime') or '').strip().lower()
-                            if time_str in s_from:
-                                chosen_slot = s
-                                break
-                    if not chosen_slot and prefer:
-                        for s in all_slots:
-                            s_from = (s.get('from') or s.get('startTime') or '').strip().lower()
-                            try:
-                                h = int(s_from.split(':')[0])
-                            except Exception:
-                                h = None
-                            if prefer == 'morning' and h is not None and 6 <= h < 12:
-                                chosen_slot = s
-                                break
-                            if prefer == 'afternoon' and h is not None and 12 <= h < 17:
-                                chosen_slot = s
-                                break
-                            if prefer == 'evening' and h is not None and 17 <= h < 22:
-                                chosen_slot = s
-                                break
-
-                    # fallback to first available
-                    if not chosen_slot and all_slots:
-                        chosen_slot = all_slots[0]
-
-                    if chosen_slot:
-                        ext_id = chosen_slot.get('slotId') or chosen_slot.get('externalId') or chosen_slot.get('id')
-                        
-                        # If still no ID, create one from slot data
-                        if not ext_id:
-                            slot_from = chosen_slot.get('from', chosen_slot.get('startTime', ''))
-                            slot_to = chosen_slot.get('to', chosen_slot.get('endTime', ''))
-                            ext_id = f"slot_{slot_from.replace(':', '')}_{slot_to.replace(':', '')}"
-                            logger.info(f"Generated slotId for confirm: {ext_id}")
-                        
-                        session_manager.update_collected(session_id, {
-                            "health_professional_id": found.get("healthProfessionalId", ""),
-                            "doctor_name": found.get("healthProfessionalName", ""),
-                            "facility_id": found.get("facilityId") or settings.DEFAULT_FACILITY_ID or "",
-                            "appointment_date": found.get("appointmentDate", ""),
-                            "appointment_time": chosen_slot.get("from", chosen_slot.get('startTime', '')),
-                            "slot_external_id": ext_id,
-                            "slot_display": f"{chosen_slot.get('from','')} - {chosen_slot.get('to','')}",
-                        })
-                        session["stage"] = "selected"
-            # Safe logging: use collected values to avoid referencing local vars that may not exist
-            collected_now = session_manager.collected(session_id)
-            doctor_id = collected_now.get("health_professional_id") or collected_now.get("selectedDoctorId")
-            slot_ext = collected_now.get("slot_external_id") or collected_now.get("selectedSlotExternalId")
-            logger.info(f"Stage → selected | doctor={doctor_id} slot_ext={slot_ext}")
-
-        # If still not selected, but we have a health_professional_id (static/default), try to fetch doctor by id
-        if session.get("stage") != "selected":
-            collected_now = session_manager.collected(session_id)
-            hp_id = collected_now.get("health_professional_id") or collected_now.get("selectedDoctorId")
-            if hp_id:
-                # ensure we have doctors cached in session
-                docs = session.get("doctors") or await doctors_cache.get_doctors()
-                # find doctor by id
-                target = None
-                for d in docs:
-                    if d.get("healthProfessionalId") == hp_id:
-                        target = d
-                        break
-
-                if target:
-                    all_slots = _flatten_available_slots(target, filter_today_future=True)
-                    # try to parse a time from user's message
-                    time_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", user_message.lower())
-                    time_str = None
-                    if time_match:
-                        hh = int(time_match.group(1))
-                        mm = int(time_match.group(2) or 0)
-                        ampm = time_match.group(3)
-                        if ampm == 'pm' and hh != 12:
-                            hh += 12
-                        if ampm == 'am' and hh == 12:
-                            hh = 0
-                        time_str = f"{hh:02d}:{mm:02d}"
-
-                    chosen_slot = None
-                    if time_str:
-                        for s in all_slots:
-                            s_from = (s.get('from') or s.get('startTime') or '').strip().lower()
-                            if time_str in s_from:
-                                chosen_slot = s
-                                break
-                    if not chosen_slot and all_slots:
-                        chosen_slot = all_slots[0]
-
-                    if chosen_slot:
-                        ext_id = chosen_slot.get('slotId') or chosen_slot.get('externalId') or chosen_slot.get('id')
-                        
-                        # If still no ID, create one from slot data
-                        if not ext_id:
-                            slot_from = chosen_slot.get('from', chosen_slot.get('startTime', ''))
-                            slot_to = chosen_slot.get('to', chosen_slot.get('endTime', ''))
-                            ext_id = f"slot_{slot_from.replace(':', '')}_{slot_to.replace(':', '')}"
-                            logger.info(f"Generated slotId for hp_id: {ext_id}")
-                        
-                        session_manager.update_collected(session_id, {
-                            "health_professional_id": target.get("healthProfessionalId", ""),
-                            "doctor_name": target.get("healthProfessionalName", ""),
-                            "facility_id": target.get("facilityId") or settings.DEFAULT_FACILITY_ID or "",
-                            "appointment_date": target.get("appointmentDate", ""),
-                            "appointment_time": chosen_slot.get("from", chosen_slot.get('startTime', '')),
-                            "slot_external_id": ext_id,
-                            "slot_display": f"{chosen_slot.get('from','')} - {chosen_slot.get('to','')}",
-                        })
-                        session["stage"] = "selected"
-                        logger.info(f"Auto-selected doctor by id {hp_id} and chosen slot {ext_id}")
-
-        # ── STEP 2: LLM extraction of patient info ────────────────────────────
-        # Run whenever message might contain personal details
-        PERSONAL_HINTS = [
-            "name", "naam", "mobile", "contact", "number", "live", "rehta", "raheta",
-            "address", "pincode", "pin", "area", "gender", "male", "female", "purush",
-            "stri", "old", "born", "years", "age", "my ", "maru", "mara", "hun ",
-            "meri", "mera", "i am", "i live", "hu ", "ane", "and my", "aapo",
-            "dr", "doctor", "time", "slot", "am", "pm", "morning", "afternoon", "evening",
-            "book", "appointment", "schedule",
-        ]
-        might_have_info = any(hint in msg_lower for hint in PERSONAL_HINTS)
-
-        if might_have_info or session["stage"] == "selected":
-            extracted = await self._extract_patient_info(user_message)
-            clean = {k: v for k, v in extracted.items() if v is not None and str(v).strip() != ""}
-            if clean:
-                # ── AUTO-SELECT DOCTOR BY NAME AND APPOINTMENT SLOT ──────────
-                extracted_doctor_name = clean.get("doctor_name")
-                extracted_slot_time = clean.get("appointment_slot")
+                    for s in _flatten_available_slots(d):
+                        all_slots.append((s, d))
                 
-                logger.info(f"[Auto-select] doctor_name='{extracted_doctor_name}' slot='{extracted_slot_time}' stage='{session['stage']}'")
-                
-                if extracted_doctor_name and extracted_slot_time and session["stage"] in ("start", "doctors_shown"):
-                    # Ensure we have doctors cached
-                    docs = session.get("doctors") or await doctors_cache.get_doctors()
-                    session["doctors"] = docs
+                if 0 <= index < len(all_slots):
+                    matched_slot, matched_doc = all_slots[index]
+                    ext_id = _slot_external_id(matched_slot, matched_doc)
+                    exact_time = matched_slot.get("from") or matched_slot.get("startTime") or ""
                     
-                    logger.info(f"[Auto-select] Loaded {len(docs)} doctors")
-                    
-                    # Find doctor by name
-                    found_doctor = find_doctor_by_name(extracted_doctor_name, docs)
-                    
-                    logger.info(f"[Auto-select] Found doctor: {found_doctor.get('healthProfessionalName') if found_doctor else None}")
-                    
-                    if found_doctor:
-                        # Select slot by time
-                        selected_slot = select_slot_by_time(found_doctor, extracted_slot_time)
+                    session_manager.update_collected(session_id, {
+                        "health_professional_id": matched_doc.get("healthProfessionalId", ""),
+                        "doctor_name":            matched_doc.get("healthProfessionalName", ""),
+                        "facility_id":            (
+                            matched_doc.get("facilityId")
+                            or (matched_doc.get("facility") or {}).get("id")
+                            or settings.DEFAULT_FACILITY_ID
+                            or ""
+                        ),
+                        "appointment_date": matched_doc.get("appointmentDate", ""),
+                        "appointment_time": exact_time,
+                        "slot_external_id": ext_id,
+                        "slot_display": f"{exact_time} – {matched_slot.get('to') or matched_slot.get('endTime') or ''}",
+                    })
+                    session["stage"] = "selected"
+                    session["_doctor_slot_locked"] = True
+                    logger.info(f"[Selection] Picked index {index+1}: {ext_id} at {exact_time}")
+            
+            # ── 4b. If no index match, try matching by LLM-extracted name/time ─
+            if not session.get("_doctor_slot_locked"):
+                target_doc = None
+                if len(session.get("doctors", [])) == 1:
+                    target_doc = session["doctors"][0]
+                elif ext_dr_name:
+                    name_low = str(ext_dr_name).lower().replace("dr.", "").strip()
+                    for d in session.get("doctors", []):
+                        if name_low in (d.get("healthProfessionalName") or "").lower():
+                            target_doc = d
+                            break
+
+                if target_doc:
+                    session["doctors"] = [target_doc]
+                    if ext_appt_time:
+                        matched_slot = None
+                        for s in _flatten_available_slots(target_doc):
+                            s_from = s.get("from") or s.get("startTime") or ""
+                            if s_from and s_from.startswith(ext_appt_time):
+                                matched_slot = s
+                                break
                         
-                        logger.info(f"[Auto-select] Selected slot: {selected_slot.get('from') if selected_slot else None}")
-                        
-                        if selected_slot:
-                            ext_id = selected_slot.get('slotId') or selected_slot.get('externalId') or selected_slot.get('id')
+                        if matched_slot and target_doc:
+                            # Use guaranteed dict variable to satisfy Pyre
+                            doc: Dict = target_doc
+                            slot: Dict = matched_slot
                             
-                            # If still no ID, create one from slot data
-                            if not ext_id:
-                                slot_from = selected_slot.get('from', selected_slot.get('startTime', ''))
-                                slot_to = selected_slot.get('to', selected_slot.get('endTime', ''))
-                                ext_id = f"slot_{slot_from.replace(':', '')}_{slot_to.replace(':', '')}"
-                                logger.info(f"Generated slotId for auto-select: {ext_id}")
+                            ext_id = _slot_external_id(slot, doc)
+                            exact_time = str(slot.get("from") or slot.get("startTime") or "")
+                            s_to = str(slot.get("to") or slot.get("endTime") or "")
                             
                             session_manager.update_collected(session_id, {
-                                "health_professional_id": found_doctor.get("healthProfessionalId", ""),
-                                "facility_id": found_doctor.get("facilityId") or settings.DEFAULT_FACILITY_ID or "",
-                                "appointment_date": found_doctor.get("appointmentDate", ""),
-                                "appointment_time": selected_slot.get("from", selected_slot.get('startTime', '')),
+                                "health_professional_id": str(doc.get("healthProfessionalId") or ""),
+                                "doctor_name":            str(doc.get("healthProfessionalName") or ""),
+                                "facility_id":            str(
+                                    doc.get("facilityId")
+                                    or (doc.get("facility") or {}).get("id")
+                                    or settings.DEFAULT_FACILITY_ID
+                                    or ""
+                                ),
+                                "appointment_date": str(doc.get("appointmentDate") or ""),
+                                "appointment_time": exact_time,
                                 "slot_external_id": ext_id,
-                                "slot_display": f"{selected_slot.get('from','')} - {selected_slot.get('to','')}",
+                                "slot_display": f"{exact_time} – {s_to}",
                             })
                             session["stage"] = "selected"
-                            logger.info(f"✅ Auto-selected doctor '{extracted_doctor_name}' and slot '{extracted_slot_time}'")
-                            doctor_selected_msg = f"✅ Doctor '{found_doctor.get('healthProfessionalName')}' selected with slot {selected_slot.get('from', '')} - {selected_slot.get('to', '')}"
-                            session_manager.add_message(session_id, "system", doctor_selected_msg)
-                
-                # Remove doctor/slot fields from clean before storing patient data
-                clean.pop("doctor_name", None)
-                clean.pop("appointment_slot", None)
-                clean.pop("symptoms", None)  # Also remove symptoms as it's handled separately
-                
-                if clean:
-                    session_manager.update_collected(session_id, clean)
-                    logger.info(f"[Extraction] Stored patient data: {clean}")
+                            session["_doctor_slot_locked"] = True
+                            logger.info(f"[Selection] Natural match: {ext_id} at {exact_time}")
+                        else:
+                            # Time provided but no match — clear any stale selection
+                            session_manager.update_collected(session_id, {
+                                "slot_external_id": None,
+                                "appointment_time": ext_appt_time, # Keep what user said for UI
+                            })
+                    else:
+                        session["stage"] = "doctor_chosen"
 
-        # ── STEP 3: Symptom detection → fetch doctors ─────────────────────────
-        SYMPTOM_KWS = [
-            "fever", "pain", "chest pain", "headache", "cough", "cold",
-            "heart", "nausea", "vomiting", "migraine", "skin", "rash",
-            "tav", "dard", "bukhar",
-        ]
-        symptoms_found = [kw for kw in SYMPTOM_KWS if kw in msg_lower]
-        
-        # Also include symptoms extracted by LLM
-        collected_now = session_manager.collected(session_id)
-        extracted_symptoms = collected_now.get("symptoms", [])
-        if extracted_symptoms:
-            if isinstance(extracted_symptoms, list):
-                symptoms_found.extend(extracted_symptoms)
-            else:
-                symptoms_found.append(str(extracted_symptoms))
-        
-        # Remove duplicates
-        symptoms_found = list(set(symptoms_found))
-
-        if symptoms_found and not session["doctors"] and session["stage"] == "start":
-            logger.info(f"Symptoms detected: {symptoms_found}")
-            all_docs = await doctors_cache.get_doctors()
-            filtered  = filter_doctors_by_symptoms(all_docs, symptoms_found)
-            session["doctors"] = filtered
-            session_manager.update_collected(session_id, {"symptoms": symptoms_found})
-            doc_text = format_doctors_for_display(filtered)
-            session_manager.add_message(session_id, "system", f"[Available doctors fetched from API]\n{doc_text}")
-            session["stage"] = "doctors_shown"
-
-        # ── STEP 4: Add user message to history ───────────────────────────────
+        # ── STEP 5: Add user message to conversation history ──────────────────
         session_manager.add_message(session_id, "user", user_message)
 
-        # ── STEP 5: Check if ready to book ───────────────────────────────────
-        collected        = session_manager.collected(session_id)
-        doctor_selected  = bool(collected.get("health_professional_id"))
-        missing_fields   = missing_patient_fields(collected)
+        # ── STEP 6: Check if ready to book ───────────────────────────────────
+        collected       = session_manager.collected(session_id)
+        doctor_selected = bool(collected.get("health_professional_id"))
+        slot_selected   = bool(collected.get("slot_external_id"))
+        missing_fields  = missing_patient_fields(collected)
+
         booking_complete = False
         booking_details  = None
         booking_msg      = ""
 
-        if session.get("booked", False):
-            logger.info("❌ Appointment already booked for this session. Skipping duplicate booking.")
-            booking_complete = True
-            booking_details = collected
-            booking_msg = "\n\n⚠️ Appointment already booked in this session. Cannot book again."
-        elif doctor_selected and not missing_fields:
+        if doctor_selected and slot_selected and not missing_fields:
             logger.info("✅ All fields present — triggering booking!")
             booking_complete, booking_details, booking_msg = await self._book_appointment(
                 session_id, session, collected
             )
+            booking_complete = True  # always mark complete when all details provided
+            if not booking_details:
+                booking_details = collected
         else:
-            logger.info(f"Doctor selected={doctor_selected} | Missing={missing_fields}")
+            logger.info(
+                f"[Status] doctor={doctor_selected} | slot={slot_selected} "
+                f"| missing={missing_fields}"
+            )
 
-        # ── STEP 6: Generate LLM response ─────────────────────────────────────
-        context_str = build_context_summary(collected)
-        missing_str = ", ".join(missing_fields) if missing_fields else "None — ready to book!"
-        system = SYSTEM_PROMPT.format(context=context_str, missing=missing_str)
+        # ── STEP 7: Build system prompt with live doctor list ─────────────────
+        context_str    = build_context_summary(collected)
+        missing_str    = ", ".join(missing_fields) if missing_fields else "None — ready to book!"
+        
+        # Only show doctor list if slot is NOT yet selected
+        if slot_selected:
+            doctor_list_str = "Selected: " + str(collected.get("doctor_name") or "Doctor") + " (" + str(collected.get("slot_display") or "Selected Slot") + ")"
+            selection_instruction = "The doctor and slot are already selected. Now STRICTLY collect only the missing patient details of the PATIENT (not the doctor)."
+        else:
+            doctor_list_str = (
+                format_doctors_for_display(session["doctors"])
+                if session.get("doctors")
+                else "Fetching available doctors from hospital system…"
+            )
+            selection_instruction = (
+                "Here are all available doctors, dates, and their from-to time slots. "
+                "Please ask the user to select one by typing the Number (e.g., '1', '2', etc.)."
+            )
 
+        system = (
+            SYSTEM_PROMPT
+            .replace("{selection_instruction}", selection_instruction)
+            .replace("{context}",     context_str)
+            .replace("{missing}",     missing_str)
+            .replace("{doctor_list}", doctor_list_str)
+        )
+
+        # ── STEP 8: Get LLM response ──────────────────────────────────────────
         llm_out = await self._llm(session_manager.messages(session_id), system)
 
-        # Append booking result to LLM response
         if booking_msg:
             llm_out += booking_msg
 
         session_manager.add_message(session_id, "assistant", llm_out)
-        logger.info(f"[{session_id}] Chat done. Booked={booking_complete}")
+        logger.info(f"[{session_id}] done. booked={booking_complete}")
 
         return {
-            "session_id":        session_id,
-            "response":          llm_out,
+            "session_id":         session_id,
+            "response":           llm_out,
             "appointment_booked": booking_complete,
-            "booking_details":   booking_details or collected,
+            "booking_details":    booking_details or collected,
         }
 
     def reset(self, session_id: str):

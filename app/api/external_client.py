@@ -36,7 +36,7 @@ class AarogyaAPIClient:
         if not from_date:
             from_date = datetime.now().strftime("%Y-%m-%d")
         if not to_date:
-            to_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            to_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
         params = {
             "fromDate": from_date,
             "toDate": to_date,
@@ -52,6 +52,14 @@ class AarogyaAPIClient:
                 response = await client.get(url, headers=self.headers, params=params)
                 response.raise_for_status()
                 data = response.json()
+                
+                # RAW API PRINT TO TERMINAL (Commented out)
+                # print("\n" + "="*50)
+                # print("RAW EXTERNAL API RESPONSE (Doctors/availibility)")
+                # print("="*50)
+                # print(data)
+                # print("="*50 + "\n")
+
                 logger.info(f"API Response: {len(data) if isinstance(data, list) else 'dict'} doctors")
                 if isinstance(data, dict) and "result" in data:
                     doctors = []
@@ -87,10 +95,27 @@ class AarogyaAPIClient:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 url = f"{self.base_url}{settings.BOOK_APPOINTMENT_ENDPOINT}"
                 logger.info(f"Booking API: {url}")
+                
+                # PRINT REQUEST BODY TO TERMINAL
+                print("\n" + "!"*50)
+                print("FINAL APPOINTMENT REQUEST BODY (JSON)")
+                print("!"*50)
+                import json
+                print(json.dumps(payload, indent=4))
+                print("!"*50 + "\n")
+
                 logger.debug(f"Payload: {payload}")
                 response = await client.post(url, headers=self.headers, json=payload)
                 response.raise_for_status()
                 result = response.json()
+
+                # RAW API PRINT TO TERMINAL (Commented out)
+                # print("\n" + "="*50)
+                # print("RAW EXTERNAL API RESPONSE (Appointment/schedule)")
+                # print("="*50)
+                # print(result)
+                # print("="*50 + "\n")
+
                 logger.info(f"Booking Success: {result}")
                 return {"success": True, "data": result}
         except httpx.HTTPStatusError as e:
