@@ -20,10 +20,10 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     LLM_MODEL: str = "llama3.2:latest"
     LLM_TEMPERATURE: float = 0.3
-    LLM_MAX_TOKENS: int = 2048
+    LLM_MAX_TOKENS: int = 512
 
     # Timeout for Ollama LLM requests (seconds)
-    OLLAMA_TIMEOUT: int = 180
+    OLLAMA_TIMEOUT: int = 300
 
     # External Hospital API — replace with your real API
     EXTERNAL_API_BASE_URL_DEV: str = "https://dev-hmis-api.aarogya.one/api/v1"
@@ -46,9 +46,7 @@ class Settings(BaseSettings):
         return self.EXTERNAL_API_KEY_DEV
 
     # External API Endpoint paths (Aarogya HMIS API)
-    DOCTORS_ENDPOINT: str = "/doctors"
     DOCTORS_AVAILABILITY_ENDPOINT: str = "/doctors/availability"
-    SLOTS_ENDPOINT: str = "/slots"
     BOOK_APPOINTMENT_ENDPOINT: str = "/appointment/schedule"
 
     # Default facility ID
@@ -58,5 +56,8 @@ class Settings(BaseSettings):
     FASTAPI_HOST: str = "0.0.0.0"
     FASTAPI_PORT: int = 8000
 
-
 settings = Settings()
+
+
+
+

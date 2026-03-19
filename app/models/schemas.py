@@ -121,7 +121,6 @@ class CollectedInfo(BaseModel):
     mobile:     Optional[str] = None
     gender:     Optional[int] = None   # 1=Male, 2=Female
     birthDate:  Optional[str] = None   # YYYY-MM-DD
-    age:        Optional[int] = None   # fallback if birthDate unknown
 
     # Address
     pinCode:  Optional[str] = None

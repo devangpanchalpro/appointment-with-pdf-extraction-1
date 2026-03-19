@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -25,9 +26,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"🚀 {settings.APP_NAME} started")
     logger.info(f"📖 Docs: http://localhost:{settings.FASTAPI_PORT}/docs")
     
-    # Pre-fetch doctors on startup
-    doctors = await doctors_cache.get_doctors()
-    logger.info(f"✅ Cached {len(doctors)} doctors from Aarogya API")
+    # Pre-fetch doctors on startup (DISABLED FOR DEBUGGING CONNECTION ISSUES)
+    # try:
+    #     import asyncio
+    #     doctors = await asyncio.wait_for(doctors_cache.get_doctors(), timeout=5.0)
+    #     logger.info(f"✅ Cached {len(doctors)} doctors from Aarogya API")
+    # except Exception as e:
+    #     logger.warning(f"⚠️ Could not pre-fetch doctors on startup: {e}")
     
     yield
     
@@ -38,6 +43,15 @@ app = FastAPI(
     title=settings.APP_NAME,
     version=settings.APP_VERSION,
     lifespan=lifespan,
+)
+
+# ── CORS Middleware ──────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -143,6 +157,7 @@ async def chat(req: ChatRequest):
         raise HTTPException(500, str(e))
 
 
+
 @app.get("/session/{session_id}", tags=["Session"])
 async def get_session(session_id: str):
     s = session_manager.get(session_id)
@@ -164,3 +179,13 @@ async def reset_session(session_id: str):
 async def list_mcp_tools():
     tools = await mcp_client.list_tools()
     return {"count": len(tools), "tools": tools}
+
+
+
+
+
+
+
+
+
+    # f0c6129e-582e-4012-aa9a-f88547a1d6bc

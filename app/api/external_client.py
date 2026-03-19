@@ -36,7 +36,7 @@ class AarogyaAPIClient:
         if not from_date:
             from_date = datetime.now().strftime("%Y-%m-%d")
         if not to_date:
-            to_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            to_date = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
         params = {
             "fromDate": from_date,
             "toDate": to_date,
@@ -53,14 +53,15 @@ class AarogyaAPIClient:
                 response.raise_for_status()
                 data = response.json()
                 
-                # RAW API PRINT TO TERMINAL (Commented out)
-                # print("\n" + "="*50)
-                # print("RAW EXTERNAL API RESPONSE (Doctors/availibility)")
-                # print("="*50)
-                # print(data)
-                # print("="*50 + "\n")
+                # RAW API PRINT TO TERMINAL
+                print("\n" + "="*50)
+                print("RAW EXTERNAL API RESPONSE (Doctors/availibility)")
+                print("="*50)
+                import json
+                print(json.dumps(data, indent=4))
+                print("="*50 + "\n")
 
-                logger.info(f"API Response: {len(data) if isinstance(data, list) else 'dict'} doctors")
+
                 if isinstance(data, dict) and "result" in data:
                     doctors = []
                     for date_entry in data["result"]:
@@ -117,6 +118,15 @@ class AarogyaAPIClient:
                 # print("="*50 + "\n")
 
                 logger.info(f"Booking Success: {result}")
+                
+                # RAW API PRINT TO TERMINAL
+                print("\n" + "="*50)
+                print("RAW EXTERNAL API RESPONSE (Appointment/schedule)")
+                print("="*50)
+                import json
+                print(json.dumps(result, indent=4))
+                print("="*50 + "\n")
+
                 return {"success": True, "data": result}
         except httpx.HTTPStatusError as e:
             error = f"HTTP {e.response.status_code}: {e.response.text}"

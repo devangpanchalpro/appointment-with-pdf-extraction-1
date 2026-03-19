@@ -8,7 +8,7 @@ import json
 from typing import List, Dict, Any
 
 # Backend API URL
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://127.0.0.1:8000"
 
 st.set_page_config(
     page_title="Medical Appointment Booking",
@@ -76,21 +76,21 @@ if prompt := st.chat_input("Type your message here..."):
                 "message": prompt,
                 "session_id": st.session_state.session_id
             }
-            # Increased timeout for LLM processing
+            # Request to /chat (non-streaming)
             response = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=120)
             response.raise_for_status()
+            
             data = response.json()
-
-            # Update session ID
-            st.session_state.session_id = data["session_id"]
-
-            # Add assistant response
-            assistant_message = data["response"]
-            st.session_state.messages.append({"role": "assistant", "content": assistant_message})
+            full_response = data.get("response", "")
+            
+            # Display assistant message
             with st.chat_message("assistant"):
-                st.markdown(assistant_message)
-
-            # Show booking status
+                st.markdown(full_response)
+            
+            # Update session state and message history
+            st.session_state.session_id = data.get("session_id")
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            
             if data.get("appointment_booked"):
                 st.success("✅ Appointment booked successfully!")
                 booking_details = data.get("booking_details", {})
