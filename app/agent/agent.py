@@ -104,47 +104,34 @@ def sanitize_doctors_list(doctors: List[Dict]) -> List[Dict]:
 # ── Doctor display ────────────────────────────────────────────────────────────
 
 def format_doctors_for_display(doctors: List[Dict]) -> str:
-    """Format doctor(s) and slots with global numbered list for easy selection."""
-    if not doctors:
+    """Format doctor(s) and slots with global numbering for selection."""
+    unique_slots = _get_unique_slots_for_selection(doctors)
+    if not unique_slots:
         return "No slots available."
 
-    # Group doctors by name + dept
-    grouped: Dict[str, Dict] = {}
-    for d in doctors:
-        name = d.get("healthProfessionalName", "Dr. Unknown")
-        dept = d.get("department", "General")
-        key = f"{name}||{dept}"
-        if key not in grouped:
-            grouped[key] = {"name": name, "dept": dept, "entries": []}
-        grouped[key]["entries"].append(d)
-
     lines = []
-    slot_num = 1
-
-    for key, info in grouped.items():
-        lines.append(f"Dr. {info['name'].replace('Dr.', '').strip()}")
-        # Sort entries by date if possible
-        for entry in sorted(info["entries"], key=lambda x: str(x.get("appointmentDate", ""))):
-            date_str = str(entry.get("appointmentDate", "???"))
-            # Format date as 'Date : DD/MM/YYYY'
+    current_doc = None
+    current_date = None
+    
+    for i, s in enumerate(unique_slots, 1):
+        doc_header = f"👨‍⚕️ Dr. {s['doctor_name'].replace('Dr.', '').strip()}"
+        if doc_header != current_doc:
+            if current_doc is not None:
+                lines.append("") # Double break for new doctor
+            lines.append(f"**{doc_header}**  ") # Bold and two spaces for break
+            current_doc = doc_header
+            current_date = None
+            
+        if s['date'] != current_date:
             try:
-                date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-                formatted_date = date_obj.strftime("%d/%m/%Y")
+                date_obj = datetime.strptime(s['date'], "%Y-%m-%d")
+                display_date = date_obj.strftime("%Y-%m-%d")
             except:
-                formatted_date = date_str
+                display_date = s['date']
+            lines.append(f"📅 Date : {display_date}  ")
+            current_date = s['date']
             
-            lines.append(f"Date : {formatted_date}")
-            
-            slots = _flatten_available_slots(entry)
-            if slots:
-                for slot in slots:
-                    s_from = str(slot.get("from") or slot.get("startTime") or "??")
-                    s_to   = str(slot.get("to")   or slot.get("endTime")   or "??")
-                    # Use '>' for slots as requested
-                    lines.append(f"> {s_from} - {s_to}")
-            else:
-                lines.append("> No available slots")
-        lines.append("") # Empty line between doctors
+        lines.append(f"{i}. ⏰ {s['from']} - {s['to']}  ")
 
     return "\n".join(lines).strip()
 
@@ -161,6 +148,49 @@ def _flatten_available_slots(doc: Dict) -> List[Dict]:
             if avail is True or str(avail).lower() == "true" or avail is None:
                 slots.append(s)
     return slots
+
+
+def _get_unique_slots_for_selection(doctors: List[Dict]) -> List[Dict]:
+    """
+    Returns a flattened, deduplicated list of available slots across all doctors.
+    This list matches the numbered order shown to the user.
+    """
+    seen_slots = set()
+    results = []
+
+    # Sort doctors for deterministic ordering (same as display)
+    sorted_doctors = sorted(doctors, key=lambda d: (
+        (d.get("healthProfessionalName") or "").lower(),
+        (d.get("department") or "").lower(),
+        str(d.get("appointmentDate", ""))
+    ))
+
+    for d in sorted_doctors:
+        name = d.get("healthProfessionalName", "Dr. Unknown").strip()
+        dept = d.get("department", "General").strip()
+        date_str = str(d.get("appointmentDate", "???"))
+        
+        slots = _flatten_available_slots(d)
+        # Sort slots by start time
+        slots_sorted = sorted(slots, key=lambda s: str(s.get("from") or s.get("startTime") or ""))
+        
+        for s in slots_sorted:
+            s_from = str(s.get("from") or s.get("startTime") or "??").strip()
+            s_to   = str(s.get("to")   or s.get("endTime")   or "??").strip()
+            
+            slot_key = (name.lower().replace("dr.", "").strip(), dept.lower(), date_str, s_from, s_to)
+            if slot_key not in seen_slots:
+                seen_slots.add(slot_key)
+                results.append({
+                    "from": s_from,
+                    "to": s_to,
+                    "date": date_str,
+                    "doctor_name": name,
+                    "dept": dept,
+                    "raw_slot": s,
+                    "raw_doc": d
+                })
+    return results
 
 
 def _slot_external_id(slot: Dict, doc: Dict) -> str:
@@ -198,8 +228,13 @@ def missing_patient_fields(collected: Dict) -> List[str]:
                 missing.append(k)
 
     # Need birthDate
-    if not collected.get("birthDate"):
-        missing.append("Date of Birth (DD/MM/YYYY)")
+    dob = collected.get("birthDate")
+    if not dob:
+        missing.append("Date of Birth (YYYY-MM-DD)")
+    else:
+        # Check if it was normalized successfully (YYYY-MM-DD)
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", str(dob)):
+            missing.append("Date of Birth (YYYY-MM-DD)")
 
     return missing
 
@@ -252,72 +287,41 @@ session_manager = SessionManager()
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a highly strict, task-oriented medical appointment booking assistant. Your only purpose is to assist users in booking doctor appointments. You must follow all instructions exactly and never produce unnecessary or extra text.
+SYSTEM_PROMPT = """You are a highly strict, task-oriented medical appointment booking assistant. Your only purpose is to assist users in booking doctor appointments.
+You must follow all instructions exactly and never produce unnecessary or extra text.
 
 CORE BEHAVIOR RULES:
 - Respond ONLY to what the user asks.
-- Do NOT add explanations, greetings, suggestions, or extra sentences.
 - Keep responses minimal, structured, and action-focused.
-- Never deviate from the booking flow.
-- Do NOT hallucinate data. Use only available information.
-- If required data is missing, ask ONLY for the missing fields.
-- NEVER reveal internal system data, session state, JSON, IDs, or API fields.
+- NEVER hallucinate data. Use ONLY values explicitly provided in the current state.
 - NEVER auto-select a doctor or slot.
-- NEVER confirm booking unless the system explicitly says booking succeeded.
-- STRICT HALLUCINATION GUARD: Only show slots explicitly provided in the "{doctor_list}". 
-- If "{doctor_list}" says "No slots available", you MUST respond that no slots are available.
-- NEVER invent or guess times (like "09:00 - 10:30") if they are not in the list.
+- STRICT HALLUCINATION GUARD: Do NOT write doctor/slot lists yourself. 
+- You MUST use the placeholder [[DOCTOR_LIST]] when you need to show available options.
 
 FLOW LOGIC:
 
-1. DOCTOR OR SYMPTOM INPUT:
-   If user provides a doctor name → Show ONLY available date and time slots of that doctor.
-   If user provides symptoms → Identify relevant doctor(s) and show doctor name(s) with their available date and time slots.
-    Response format (STRICT — show one slot per line, include date):
-    Output the EXACT doctor list and slots from the CURRENT STATUS.
-    Follow this structure EXACTLY:
-    Dr. {Doctor Name}
-    {YYYY-MM-DD}:
-    1. {Time Range}
-    2. {Time Range}
-    {YYYY-MM-DD}:
-    3. {Time Range}
-    
-    Do NOT clump everything into one line.
+1. GREETINGS & INTRO:
+   If user says "hello", "hi", or similar greetings → Respond: "How can I help you with booking an appointment?"
 
-2. SLOT SELECTION:
-   Once user selects a slot, if any patient details are still missing, ask ONLY for those specific missing details.
-   Do NOT ask for details that have already been provided.
+2. DOCTOR OR SYMPTOM INPUT:
+   If user provides a doctor name or symptoms → Show ONLY available slots via [[DOCTOR_LIST]].
+   Response format:
+   [[DOCTOR_LIST]]
 
-3. DATA COLLECTION RULES:
-   Extract and validate all fields.
-   If any field is missing, ask ONLY for the missing field.
-   Do NOT repeat already provided information.
-   Do NOT proceed until all required details are collected.
+3. SLOT SELECTION:
+   Once user selects a slot (by number), if patient details are missing, ask for them.
+   Use format: "Please provide patient Full name, DOB, gender, address, Contact for book you appointment"
 
 4. FINAL CONFIRMATION:
    After all details are successfully collected, respond ONLY with:
    "Your appointment is scheduled with Dr. {Doctor Name} on {Date} at {Time}. Please arrive 15 minutes before the scheduled time."
-   No extra text allowed.
 
-STRICT RESTRICTIONS:
-- No greetings (e.g., "Hello", "Hi")
-- No explanations
-- No suggestions
-- No apologies unless required for missing data
-- No repetition
-- No additional formatting outside defined structure
-
-FAILURE HANDLING:
-- If user input is unclear → Ask a minimal clarification question.
-- If no slots available → Respond ONLY: "No slots available."
-
-This is a strict execution system. Output must always be minimal, structured, and directly aligned with the booking workflow.
+No extra text allowed.
 
 ## CURRENT STATUS:
 {situation}
 
-## AVAILABLE DOCTORS & SLOTS:
+## AVAILABLE DOCTORS & SLOTS (inserted via placeholder):
 {doctor_list}
 """
 
@@ -340,66 +344,40 @@ Fields to extract:
   "symptoms":   array of strings or null,
   "doctor_name": string or null,
   "appointment_date": "YYYY-MM-DD" or null,
-  "appointment_time": "HH:MM - HH:MM" or null
+  "appointment_time": "HH:MM" or null
 }}
 
 CRITICAL RULES:
 
 ⚠️  PATIENT vs DOCTOR SEPARATION:
-  - If user mentions ONLY a doctor name (e.g., "I want to see Dr. Dhruv Barot"):
-    → Extract ONLY doctor_name="Dr. Dhruv Barot"
-    → Set firstName, lastName, mobile, etc. to NULL
-  - If user gives PATIENT details (e.g., "My name is Rahul Patel"):
-    → Extract firstName, lastName from PATIENT info ONLY
-    → NEVER extract doctor titles (Dr, Mrs, Mr) as patient names
-    → NEVER extract doctor names into patient fields
+  - If user mentions ONLY a doctor name (e.g., "I want to see Dr. Smith"):
+    → Extract ONLY doctor_name="Dr. Smith"
+    → Set ALL patient fields (firstName, lastName, mobile, etc.) to NULL
+  - NEVER extract doctor titles (Dr, Mrs, Mr) or names into patient fields.
+  - Extract patient names ONLY if explicitly provided (e.g., "My name is John").
 
-⚠️  DO NOT OVERRIDE DATES:
-  - If user types "18:00 - 18:15", extract appointment_time: "18:00 - 18:15"
-  - NEVER extract appointment dates (like 2026-03-17) into the birthDate (DOB) field unless explicitly stated as birth date.
-  - NEVER change the appointment_date if it's already extracted, keep it as it is in the text if mentioned.
+⚠️  NO HALLUCINATION:
+  - Do NOT extract fields that are not explicitly mentioned in the User text.
+  - NEVER guess or use example values (like "395006" or "2026-03-20") unless they appear exactly in the User text.
+  - If a field is missing, set it to NULL.
 
-⚠️  NAME EXTRACTION:
-  - NEVER include titles: "Dr", "Mrs", "Mr", "Ms", "Doctor"
-  - NEVER extract pronouns or filler: "I", "me", "my", "hu", "mane", "mera", "is", "am"
-  - If text is "Dr. Dhruv Barot" alone → doctor_name ONLY, patient names = null
-  - If text is "I am Rahul Sharma" → firstName="Rahul", lastName="Sharma" (NOT "I am")
+⚠️  DATES & TIMES:
+  - birthDate: extract ONLY if user says "date of birth", "dob", or "born on".
+  - appointment_date: extract ONLY if user says "on [date]" for the appointment.
+  - appointment_time: extract ONLY if user mentions a specific time or slot.
 
-⚠️  ADDRESS EXTRACTION:
-  - NEVER include "is ", "at ", "my address is " or any other filler.
-  - E.g., "my address is 222, nikol" → address: "222, nikol" (STRICTLY remove "is").
+⚠️  CLEANING:
+  - Remove fillers like "my name is", "lives at", "contact number" etc.
+  - Address: Return strictly the location, no "is at" or similar.
 
-⚠️  OTHER RULES:
-  - Extract the exact requested appointment date/time. E.g., "18:00 - 18:15" -> appointment_time: "18:00 - 18:15"
-  - For symptoms: extract ONLY health complaints (e.g., "chest pain", "fever")
-  - mobile: exactly 10 digits, no spaces/dashes
-  - gender: only "Male" or "Female" or null
-  - birthDate: YYYY-MM-DD or null
-  - pinCode: exactly 6 digits or null
-  - after the dr. slots shown so ask to user for please put Dr. name, date and time slot in once 
-Name parsing (for patient names ONLY):
-  - Ignore grammatical filler (is, am, was, my name is, etc).
-  - 1 word  → firstName
-  - 2 words → firstName + lastName
-  - 3 words → firstName + middleName + lastName
-  - Example: "panchal dhaval ronakshin" → firstName: "panchal", middleName: "dhaval", lastName: "ronakshin"
-  - Example: "Rahul Sharma" → firstName: "Rahul", lastName: "Sharma", middleName: null
-  - NEVER duplicate names.
+Examples:
+Text: "I want to see Dr. Dhruv Barot"
+Output: {{"doctor_name": "Dr. Dhruv Barot", "firstName": null, "lastName": null, "appointment_date": null}}
 
-Pin Code Extraction:
-  - If a 6-digit number is provided anywhere (like 395006), ALWAYS extract it to "pinCode".
+Text: "My name is Rahul Patel, mobile 9999911111"
+Output: {{"firstName": "Rahul", "lastName": "Patel", "mobile": "9999911111"}}
 
-Here are few examples:
-Text: "I want to see Dr. Dhruv Barot on 2026-03-20 at 19:00 - 19:15"
-Output: {{"doctor_name": "Dr. Dhruv Barot", "appointment_date": "2026-03-20", "appointment_time": "19:00 - 19:15"}}
-
-Text: "My name is John Doe"
-Output: {{"firstName": "John", "lastName": "Doe"}}
-
-Text: "DOB is 1990-05-05" 
-Output: {{"birthDate": "1990-05-05"}}
-
-Return ONLY the JSON object, nothing else.
+Return ONLY the JSON object.
 
 Current year: {year}
 
@@ -674,15 +652,18 @@ class AppointmentAgent:
             if val:
                 v = str(val).strip()
                 v_low = v.lower()
-                # If name matches selected doctor or is too generic or matches "doctor_name" extracted, ignore it
+                
+                # Stronger protection: if any word in patient name matches any word in doctor name, clear it
+                dr_words = set(dr_name_text.split()) | set(locked_dr_low.split())
+                v_words = set(v_low.split())
+                
                 if len(v) < 2 or v_low in FORBIDDEN_NAMES:
                     data[field] = None
-                elif locked_dr_low and (locked_dr_low in v_low) and len(v) > 3:
-                    data[field] = None  # doctor name leaked into patient field
-                elif dr_name_text and (dr_name_text in v_low) and len(v) > 3:
-                    data[field] = None  # doctor name leaked into patient field
                 elif v_low in ("dr", "mrs", "mr", "ms", "doc", "doctor"):
-                    data[field] = None  # Title, not a patient name
+                    data[field] = None
+                elif dr_words and (v_words & dr_words):
+                    # Leakage detected: patient name overlaps with doctor name
+                    data[field] = None
 
         # Normalise gender to int
         g = data.get("gender")
@@ -697,6 +678,29 @@ class AppointmentAgent:
                     data["gender"] = int(g) if int(g) in (1, 2) else None
                 except Exception:
                     data["gender"] = None
+
+        # ── Birth Date normalization ──────────────────────────────────────────
+        dob = data.get("birthDate")
+        if dob:
+            d_str = str(dob).strip()
+            normalized = None
+            # Try various formats
+            formats = ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]
+            for f in formats:
+                try:
+                    dt = datetime.strptime(d_str, f)
+                    # Sanity check: year must be reasonable (e.g., > 1900)
+                    if dt.year > 1900 and dt.year <= datetime.now().year:
+                        normalized = dt.strftime("%Y-%m-%d")
+                        break
+                except ValueError:
+                    continue
+            
+            # If still not normalized, maybe it's missing the year (e.g., "12/07")
+            if not normalized:
+                data["birthDate"] = None # Mark as invalid
+            else:
+                data["birthDate"] = normalized
 
         return data
 
@@ -716,7 +720,11 @@ class AppointmentAgent:
             birth_date_str = collected.get("birthDate")
 
             if birth_date_str:
-                birth_date = datetime.strptime(str(birth_date_str), "%Y-%m-%d")
+                try:
+                    birth_date = datetime.strptime(str(birth_date_str), "%Y-%m-%d")
+                except ValueError:
+                    logger.error(f"[Booking] Invalid birthDate format in collected info: {birth_date_str}")
+                    return False, None, "\n❌ Booking failed: invalid date of birth format. Please provide it as YYYY-MM-DD."
             else:
                 return False, None, "\n❌ Booking failed: date of birth is required."
 
@@ -795,40 +803,50 @@ class AppointmentAgent:
             # ── STEP 1: Try instant regex extraction FIRST (no LLM needed) ───
             fast_result = _fast_extract(user_message)
             fast_clean = {k: v for k, v in fast_result.items() if v is not None and str(v).strip() != ""}
+            
             if fast_clean:
-                session_manager.update_collected(session_id, fast_clean)
-                logger.info(f"[FastExtract] stored: {fast_clean}")
+                slot_selected_before = bool(collected.get("slot_external_id"))
+                if not slot_selected_before:
+                    # In inquiry phase, only allow doctor/symptom/selection fields from fast-path
+                    fast_filtered = {k: v for k, v in fast_clean.items() if k in ["doctor_name", "symptoms", "appointment_date", "appointment_time"]}
+                    if fast_filtered:
+                        session_manager.update_collected(session_id, fast_filtered)
+                        logger.info(f"[FastExtract] Pre-selection phase - stored only: {fast_filtered}")
+                else:
+                    # After selection, allow all patient details
+                    session_manager.update_collected(session_id, fast_clean)
+                    logger.info(f"[FastExtract] Post-selection phase - stored all: {fast_clean}")
 
             # ── STEP 1b: Fetch doctor list in parallel while deciding extraction
-            # Only fall back to LLM if regex didn't find key patient fields AND
-            # the message looks like natural language (>2 words, no digits)
+            # PHASE LOGIC: Only extract patient info IF a slot is already selected.
+            # Otherwise, only extract doctor_name and symptoms.
+            slot_selected_before = bool(collected.get("slot_external_id"))
+            
             words = user_message.strip().split()
-            needs_llm = (
-                len(words) > 2
-                and not fast_clean.get("firstName")
-                and not fast_clean.get("mobile")
-                and not re.search(r'\b(dr\.?|doctor|symptom|pain|fever|cough)\b', user_message.lower())
-            )
-            # Always detect doctor name / symptoms via LLM if message is conversational
-            # but skip if regex already captured everything
-            always_llm = bool(
-                re.search(r'\b(dr\.?|doctor|symptom|pain|fever|cough|headache|cold|nausea)\b', user_message.lower())
-                and not fast_clean
-            )
+            needs_llm = len(words) > 1
 
-            dr_name_locked = collected.get("doctor_name") or ""
-            if needs_llm or always_llm:
+            if needs_llm:
+                dr_name_locked = collected.get("doctor_name") or ""
                 extracted, all_docs = await asyncio.gather(
                     self._extract_patient_info(user_message, dr_name_locked),
                     doctors_cache.get_doctors()
                 )
-                # Merge LLM results but don't overwrite what regex already found
-                for k, v in extracted.items():
-                    if v is not None and str(v).strip() != "" and k not in fast_clean:
-                        fast_clean[k] = v
-                if fast_clean:
-                    session_manager.update_collected(session_id, fast_clean)
-                    logger.info(f"[Extraction] merged: {fast_clean}")
+                
+                # Phase-based filter
+                to_store = {}
+                if not slot_selected_before:
+                    # Only store doctor/symptoms + date/time (for selection)
+                    for k in ["doctor_name", "symptoms", "appointment_date", "appointment_time"]:
+                        if k in extracted and extracted[k]:
+                            to_store[k] = extracted[k]
+                    logger.info(f"[Extraction] Pre-selection phase - stored only: {to_store}")
+                else:
+                    # Already have a slot - store everything (patient details)
+                    to_store = extracted
+                    logger.info(f"[Extraction] Post-selection phase - stored all: {to_store}")
+
+                if to_store:
+                    session_manager.update_collected(session_id, to_store)
             else:
                 all_docs = await doctors_cache.get_doctors()
         sanitized_docs = sanitize_doctors_list(all_docs)
@@ -897,15 +915,15 @@ class AppointmentAgent:
             digit_match = re.search(r"^\s*(\d+)\s*$", user_message)
             if digit_match:
                 index = int(digit_match.group(1)) - 1
-                all_slots: List[Tuple[Dict, Dict]] = [] # (slot, doc_entry)
-                for d in session.get("doctors", []):
-                    for s in _flatten_available_slots(d):
-                        all_slots.append((s, d))
+                unique_slots = _get_unique_slots_for_selection(session.get("doctors", []))
                 
-                if 0 <= index < len(all_slots):
-                    matched_slot, matched_doc = all_slots[index]
+                if 0 <= index < len(unique_slots):
+                    item = unique_slots[index]
+                    matched_slot = item["raw_slot"]
+                    matched_doc = item["raw_doc"]
+                    
                     ext_id = _slot_external_id(matched_slot, matched_doc)
-                    exact_time = matched_slot.get("from") or matched_slot.get("startTime") or ""
+                    exact_time = item["from"]
                     
                     session_manager.update_collected(session_id, {
                         "health_professional_id": matched_doc.get("healthProfessionalId", ""),
@@ -919,7 +937,7 @@ class AppointmentAgent:
                         "appointment_date": matched_doc.get("appointmentDate", ""),
                         "appointment_time": exact_time,
                         "slot_external_id": ext_id,
-                        "slot_display": f"{exact_time} - {matched_slot.get('to') or matched_slot.get('endTime') or ''}",
+                        "slot_display": f"{exact_time} - {item['to']}",
                     })
                     session["stage"] = "selected"
                     session["_doctor_slot_locked"] = True

@@ -8,16 +8,62 @@ import json
 from typing import List, Dict, Any
 
 # Backend API URL
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = "http://localhost:8001"
 
 st.set_page_config(
     page_title="Medical Appointment Booking",
     page_icon="🏥",
-    layout="wide"
+    layout="centered"
 )
+                                        
+# Custom CSS for Premium Look
+st.markdown("""
+<style>
+    .main {
+        background-color: #f8f9fa;
+    }
+   
+    .stChatMessage {
+        border-radius: 15px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .stChatMessage.user {
+        background-color: #e3f2fd;
+        border: 1px solid #bbdefb;
+    }
+    .stChatMessage.assistant {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+    }
+    .main-title{
+        color:white;
+        font-family: 'Inter', sans-serif;
+        font-weight: bold;      
+        margin:0;                     
+        font-size: 3rem;
+    }
+    .booking-result {
+        background-color: #e8f5e9;
+        border: 1px solid #c8e6c9;
+        border-radius: 10px;
+        padding: 1.5rem;
+        margin-top: 1rem;
+    }
+    .booking-field {
+        font-weight: bold;
+        color: #2e7d32;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-st.title("🏥 Medical Appointment Booking Agent")
-st.markdown("Chat with our AI assistant to book medical appointments")
+# Header with Logo and Title
+col1, col2 = st.columns([1, 8])
+with col1:
+    st.markdown('<div style="font-size: 50px; line-height: 1; margin-left: 20px;">🏥</div>', unsafe_allow_html=True)
+with col2:
+    st.markdown('<h2 class="main-title">AarogyaOne Appointment Booking Agent</h2>', unsafe_allow_html=True)
 
 # Initialize session state
 if "messages" not in st.session_state:
@@ -25,37 +71,31 @@ if "messages" not in st.session_state:
 if "session_id" not in st.session_state:
     st.session_state.session_id = None
 
-# Sidebar for session info
+# Sidebar restoration
 with st.sidebar:
-    st.header("Session Info")
+    st.header("🏥 AarogyaOne")
     if st.session_state.session_id:
-        st.write(f"Session ID: {st.session_state.session_id}")
+        st.info(f"Session Active: {st.session_state.session_id[:8]}...")
     else:
         st.write("No active session")
-
-    if st.button("New Chat"):
+        
+    if st.button("🔄 New Chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.session_id = None
         st.rerun()
-
-    st.header("System Status")
+    
+    st.divider()
+    st.write("### System Status")
     try:
-        health_response = requests.get(f"{API_BASE_URL}/health", timeout=10)
+        health_response = requests.get(f"{API_BASE_URL}/health", timeout=5)
         if health_response.status_code == 200:
-            health_data = health_response.json()
-            st.success("✅ Backend Connected")
-            st.write(f"Ollama: {'✅ Running' if health_data.get('ollama') else '❌ Offline'}")
-            st.write(f"MCP Tools: {health_data.get('mcp_tools', 0)}")
+            st.success("✅ Connected")
         else:
-            st.error("❌ Backend Health Check Failed")
-    except Exception as e:
-        st.error(f"❌ Cannot connect to backend: {e}")
-        st.info("💡 Make sure FastAPI server is running: `python run.py`")
+            st.error("❌ Link Down")
+    except:
+        st.error("❌ Gateway Timeout")
 
 # Chat interface
-st.subheader("Chat")
-
-# Display chat messages
 chat_container = st.container()
 with chat_container:
     for message in st.session_state.messages:
@@ -63,20 +103,19 @@ with chat_container:
             st.markdown(message["content"])
 
 # Chat input
-if prompt := st.chat_input("Type your message here..."):
+if prompt := st.chat_input("How can I help you book an appointment today?"):
     # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     # Send to backend with loading indicator
-    with st.spinner("🤖 Thinking... "):
+    with st.spinner("Processing..."):
         try:
             payload = {
                 "message": prompt,
                 "session_id": st.session_state.session_id
             }
-            # Request to /chat (non-streaming)
             response = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=120)
             response.raise_for_status()
             
@@ -87,32 +126,28 @@ if prompt := st.chat_input("Type your message here..."):
             with st.chat_message("assistant"):
                 st.markdown(full_response)
             
-            # Update session state and message history
+            # Update session state
             st.session_state.session_id = data.get("session_id")
             st.session_state.messages.append({"role": "assistant", "content": full_response})
             
             if data.get("appointment_booked"):
-                st.success("✅ Appointment booked successfully!")
-                booking_details = data.get("booking_details", {})
-                if booking_details:
-                    st.json(booking_details)
+                details = data.get("booking_details", {})
+                res = details.get("result", {}) if "result" in details else details
+                
+                st.markdown(f"""
+                <div class="booking-result">
+                    <h4>✅ Appointment Confirmed</h4>
+                    <p><span class="booking-field">token</span> - {res.get('token', 'N/A')}</p>
+                    <p><span class="booking-field">patientId</span> - {res.get('patientId', 'N/A')}</p>
+                    <p><span class="booking-field">facilityId</span> - {res.get('facilityId', 'N/A')}</p>
+                    <p><span class="booking-field">appointmentId</span> - {res.get('appointmentId', 'N/A')}</p>
+                </div>
+                """, unsafe_allow_html=True)
 
-        except requests.exceptions.Timeout:
-            error_msg = "⏰ Response timed out. The AI might be processing slowly. Please try again."
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            with st.chat_message("assistant"):
-                st.error(error_msg)
-        except requests.exceptions.ConnectionError:
-            error_msg = "❌ Cannot connect to backend. Please ensure the FastAPI server is running on port 8000."
-            st.session_state.messages.append({"role": "assistant", "content": error_msg})
-            with st.chat_message("assistant"):
-                st.error(error_msg)
         except Exception as e:
             error_msg = f"❌ Error: {str(e)}"
             st.session_state.messages.append({"role": "assistant", "content": error_msg})
             with st.chat_message("assistant"):
                 st.error(error_msg)
 
-# Footer
-st.markdown("---")
-st.markdown("Built with Streamlit + FastAPI + Ollama")
+# Footer removed per user request
