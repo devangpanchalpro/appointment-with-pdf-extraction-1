@@ -36,7 +36,8 @@ class AarogyaAPIClient:
         if not from_date:
             from_date = datetime.now().strftime("%Y-%m-%d")
         if not to_date:
-            to_date = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+            # Expand window from 2 days to 7 days to match periodic API availability expectations.
+            to_date = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
         params = {
             "fromDate": from_date,
             "toDate": to_date,

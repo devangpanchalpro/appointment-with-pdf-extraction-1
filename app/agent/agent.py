@@ -141,12 +141,21 @@ def format_doctors_for_display(doctors: List[Dict]) -> str:
 def _flatten_available_slots(doc: Dict) -> List[Dict]:
     """Return a flat list of all available slots for a doctor entry."""
     slots: List[Dict] = []
+
+    def slot_is_available(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        return text in ("true", "1", "yes", "available")
+
     for sched in doc.get("schedule", []):
         for s in sched.get("slots", []):
-            # If isAvailable is missing, assume it IS available (per user's screenshot)
             avail = s.get("isAvailable")
-            if avail is True or str(avail).lower() == "true" or avail is None:
+            if slot_is_available(avail):
                 slots.append(s)
+
     return slots
 
 
@@ -431,7 +440,8 @@ def _fast_extract(text: str) -> Dict:
         
     if extracted_date:
         year_int = int(extracted_date.split('-')[0])
-        # If year is this year or next year, it's an appointment date unless 'dob' is mentioned
+        # If year is this year or next year, it's an appointment date unless 'dob' is mentioned.
+        # Historic years should remain birthDate and must not silently overwrite slot appointment_date.
         if year_int < datetime.now().year - 1 or re.search(r'\b(dob|birth|born|age|janma)\b', tl):
             result["birthDate"] = extracted_date
         else:
@@ -702,6 +712,15 @@ class AppointmentAgent:
             else:
                 data["birthDate"] = normalized
 
+        # If extraction returned both appointment_date and a valid birthDate (typically patient DOB), do not overwrite selected slot.
+        if data.get("birthDate") and data.get("appointment_date"):
+            try:
+                y = int(str(data.get("birthDate")).split("-")[0])
+                if y < datetime.now().year - 1:
+                    data.pop("appointment_date", None)
+            except Exception:
+                pass
+
         return data
 
     # ── Booking ───────────────────────────────────────────────────────────────
@@ -813,9 +832,11 @@ class AppointmentAgent:
                         session_manager.update_collected(session_id, fast_filtered)
                         logger.info(f"[FastExtract] Pre-selection phase - stored only: {fast_filtered}")
                 else:
-                    # After selection, allow all patient details
-                    session_manager.update_collected(session_id, fast_clean)
-                    logger.info(f"[FastExtract] Post-selection phase - stored all: {fast_clean}")
+                    # After selection, allow all patient details but preserve booked slot date/time
+                    post_filtered = {k: v for k, v in fast_clean.items() if k not in ["appointment_date", "appointment_time"]}
+                    if post_filtered:
+                        session_manager.update_collected(session_id, post_filtered)
+                        logger.info(f"[FastExtract] Post-selection phase - stored patient details only: {post_filtered}")
 
             # ── STEP 1b: Fetch doctor list in parallel while deciding extraction
             # PHASE LOGIC: Only extract patient info IF a slot is already selected.
@@ -841,9 +862,9 @@ class AppointmentAgent:
                             to_store[k] = extracted[k]
                     logger.info(f"[Extraction] Pre-selection phase - stored only: {to_store}")
                 else:
-                    # Already have a slot - store everything (patient details)
-                    to_store = extracted
-                    logger.info(f"[Extraction] Post-selection phase - stored all: {to_store}")
+                    # Already have a slot - store patient details only and preserve chosen slot date/time
+                    to_store = {k: v for k, v in extracted.items() if k not in ["appointment_date", "appointment_time"] and v}
+                    logger.info(f"[Extraction] Post-selection phase - stored patient details only: {to_store}")
 
                 if to_store:
                     session_manager.update_collected(session_id, to_store)

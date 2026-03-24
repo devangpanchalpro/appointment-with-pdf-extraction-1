@@ -5,7 +5,7 @@ Tools: get_doctors, schedule_appointment
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional,Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -73,26 +73,45 @@ async def get_doctors_by_symptoms(
         d for d in all_doctors
         if specialization.lower() in d.get("specialization", "").lower()
     ] or all_doctors  # If no match, show all
-    
+
+    def slot_is_available(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        return text in ("true", "1", "yes", "available")
+
     # Format for agent
     formatted = []
     for i, doc in enumerate(matched, 1):
-        slots = doc.get("availableSlots", [])
+        schedule = doc.get("schedule", []) if doc.get("schedule") else []
+        raw_slots = []
+        for segment in schedule:
+            for slot in segment.get("slots", []):
+                if slot_is_available(slot.get("isAvailable")):
+                    raw_slots.append({
+                        "startTime": slot.get("from") or slot.get("startTime") or "",
+                        "endTime": slot.get("to") or slot.get("endTime") or "",
+                        "dateTime": doc.get("appointmentDate") or slot.get("dateTime") or "",
+                        "externalId": slot.get("externalId") or slot.get("slotId") or "",
+                    })
+
         formatted_slots = []
-        for j, slot in enumerate(slots[:10], 1):  # Max 10 slots
+        for j, slot in enumerate(raw_slots[:10], 1):  # Max 10 slots
             formatted_slots.append({
                 "index": j,
-                "externalId": slot.get("externalId") or slot.get("slotId") or f"slot_{j}",
+                "externalId": slot.get("externalId") or f"slot_{j}",
                 "startTime": slot.get("startTime", ""),
                 "endTime": slot.get("endTime", ""),
-                "dateTime": slot.get("dateTime") or slot.get("startTime", ""),
+                "dateTime": slot.get("dateTime", ""),
                 "displayTime": f"{slot.get('startTime', '')} - {slot.get('endTime', '')}",
             })
-        
+
         formatted.append({
             "index": i,
             "healthProfessionalId": doc.get("healthProfessionalId", ""),
-            "name": doc.get("name", ""),
+            "name": doc.get("healthProfessionalName", doc.get("name", "")),
             "specialization": doc.get("specialization", ""),
             "facilityId": doc.get("facilityId", settings.DEFAULT_FACILITY_ID),
             "qualification": doc.get("qualification", ""),
