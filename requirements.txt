@@ -23,3 +23,10 @@ python-dotenv
 # Streamlit UI
 streamlit
 requests
+
+
+google-genai
+sentence-transformers
+faiss-cpu
+Pillow
+pdf2image

@@ -1,0 +1,25 @@
+Metadata-Version: 2.4
+Name: medical-qa
+Version: 0.1.0
+Summary: Medical Appointment Booking Agent with RAG
+Requires-Python: >=3.9
+Requires-Dist: fastapi
+Requires-Dist: uvicorn[standard]
+Requires-Dist: mcp
+Requires-Dist: httpx
+Requires-Dist: pydantic
+Requires-Dist: pydantic-settings
+Requires-Dist: python-dotenv
+Requires-Dist: streamlit
+Requires-Dist: requests
+Requires-Dist: google-genai
+Requires-Dist: sentence-transformers
+Requires-Dist: faiss-cpu
+Requires-Dist: pdf2image
+Requires-Dist: PyPDF2
+Requires-Dist: pillow
+Requires-Dist: pytesseract
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: black; extra == "dev"
+Requires-Dist: flake8; extra == "dev"

@@ -605,6 +605,7 @@ class AppointmentAgent:
 
             logger.info(f"[Extraction] raw result: {data}")
             data = self._clean_extracted_data(data, dr_name)
+            logger.info(f"[Extraction] cleaned result: {data}")
             return data
         except httpx.ConnectError:
             logger.error("[Extraction] Cannot connect to Ollama.")
@@ -810,7 +811,9 @@ class AppointmentAgent:
     async def chat(self, session_id: str, user_message: str) -> Dict[str, Any]:
         session   = session_manager.get(session_id)
         collected = session_manager.collected(session_id)
-        logger.info(f"[{session_id}] stage={session['stage']} | user: {str(user_message)[:120]}")
+        logger.info(f"--- Chat Start [{session_id}] ---")
+        logger.info(f"Stage: {session['stage']} | Collected: {collected}")
+        logger.info(f"User Message: {user_message}")
 
         # ── Fast-path: Skip extraction if message is just a digit (slot selection) ──
         digit_match = re.search(r"^\s*(\d+)\s*$", user_message)
@@ -996,6 +999,7 @@ class AppointmentAgent:
                                 if s_from == ext_appt_time or ext_appt_time.replace(" ", "") in slot_label.replace(" ", ""):
                                     matched_slot = s
                                     matched_doc = d
+                                    logger.info(f"[Selection] Slot matched via extracted time: {s_from}")
                                     break
                             if matched_slot:
                                 break
@@ -1130,7 +1134,9 @@ class AppointmentAgent:
             llm_out += "\n\n" + booking_msg
 
         session_manager.add_message(session_id, "assistant", llm_out)
-        logger.info(f"[{session_id}] done. booked={booking_complete}")
+        logger.info(f"[{session_id}] Response: {llm_out[:100]}...")
+        logger.info(f"[{session_id}] Done. Booked: {booking_complete}")
+        logger.info(f"--- Chat End [{session_id}] ---")
 
         return {
             "session_id":         session_id,

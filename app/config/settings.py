@@ -14,13 +14,17 @@ class Settings(BaseSettings):
     # App
     APP_NAME: str = "Medical Appointment Booking Agent"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    DEBUG: bool = True  # Set to False for faster startup (disable hot reload)
 
     # LLM (Ollama + Llama 3.2)
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     LLM_MODEL: str = "llama3.2:latest"
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 512
+
+    # Embeddings: Set to True to use Gemini embeddings (faster/offloads local CPU),
+    # False to use local SentenceTransformer.
+    USE_GEMINI_EMBEDDINGS: bool = True
 
     # Timeout for Ollama LLM requests (seconds)
     OLLAMA_TIMEOUT: int = 300

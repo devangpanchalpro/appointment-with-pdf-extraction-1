@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medical-qa"
+version = "0.1.0"
+description = "Medical Appointment Booking Agent with RAG"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "mcp",
+    "httpx",
+    "pydantic",
+    "pydantic-settings",
+    "python-dotenv",
+    "streamlit",
+    "requests",
+    "google-genai",
+    "sentence-transformers",
+    "faiss-cpu",
+    "pdf2image",
+    "PyPDF2",
+    "pillow",
+    "pytesseract",
+]
+
+[tool.setuptools]
+packages = ["app", "medical_qa"]
+
+[project.optional-dependencies]
+dev = ["pytest", "black", "flake8"]

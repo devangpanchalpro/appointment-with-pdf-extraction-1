@@ -185,7 +185,8 @@ async def list_mcp_tools():
 
 
 
-
+from medical_qa.route import register_qa_routes
+register_qa_routes(app)
 
 
     # f0c6129e-582e-4012-aa9a-f88547a1d6bc
