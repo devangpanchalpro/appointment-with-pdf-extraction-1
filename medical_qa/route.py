@@ -11,12 +11,15 @@ from medical_qa.chat_engine import build_chat_answer
 
 
 class ChatRequest(BaseModel):
-    abha_number: str
+    abha_number: str = ""
     query: str
     top_k: int = 4
+    history: list = []
 
     @validator("abha_number")
     def check_abha(cls, v):
+        if not v or v.strip() == "":
+            return ""
         digits = re.sub(r"[-\s]", "", v.strip())
         if not digits.isdigit() or len(digits) != 14:
             raise ValueError("ABHA number must be exactly 14 digits")
@@ -48,8 +51,8 @@ def register_qa_routes(app):
 
     @app.post("/api/qa/chat/")
     async def qa_chat(req: ChatRequest):
-        answer  = build_chat_answer(req.query, req.abha_number, [])
-        sources = rag.files(req.abha_number)
+        answer  = build_chat_answer(req.query, req.abha_number, req.history)
+        sources = rag.files(req.abha_number) if req.abha_number else []
         return {
             "answer":   answer,
             "sources":  sources,
@@ -64,12 +67,19 @@ def register_qa_routes(app):
             raise HTTPException(400, "Invalid ABHA number")
         indexed  = rag.files(digits)
         user_dir = os.path.join(BASE_DIR, digits)
-        saved    = sorted([f for f in os.listdir(user_dir) if f.endswith(".json")]) \
-                   if os.path.exists(user_dir) else []
+        if os.path.exists(user_dir):
+            all_files = sorted(os.listdir(user_dir))
+            saved_jsons = [f for f in all_files if f.endswith(".json")]
+            original_docs = [f for f in all_files if not f.endswith(".json")]
+        else:
+            saved_jsons = []
+            original_docs = []
+            
         return {
             "abha_number":      digits,
             "indexed_files":    indexed,
-            "saved_json_files": saved,
+            "saved_json_files": saved_jsons,
+            "original_documents": original_docs,
             "processing_status": upload_progress.get(digits, {})
         }
 

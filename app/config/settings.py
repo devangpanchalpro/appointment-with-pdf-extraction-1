@@ -20,11 +20,11 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     LLM_MODEL: str = "llama3.2:latest"
     LLM_TEMPERATURE: float = 0.3
-    LLM_MAX_TOKENS: int = 512
+    LLM_MAX_TOKENS: int = 2048
 
     # Embeddings: Set to True to use Gemini embeddings (faster/offloads local CPU),
     # False to use local SentenceTransformer.
-    USE_GEMINI_EMBEDDINGS: bool = True
+    USE_GEMINI_EMBEDDINGS: bool = False
 
     # Timeout for Ollama LLM requests (seconds)
     OLLAMA_TIMEOUT: int = 300
@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     EXTERNAL_API_KEY_DEV: Optional[str] = None
     EXTERNAL_API_KEY_PROD: Optional[str] = None
     EXTERNAL_API_TIMEOUT: int = 30
+    DOCTORS_AVAILABILITY_ENDPOINT: str = "/doctors/availability"
+    BOOK_APPOINTMENT_ENDPOINT: str = "/appointment/schedule"
 
     # Computed properties
     @property
@@ -54,7 +56,7 @@ class Settings(BaseSettings):
     BOOK_APPOINTMENT_ENDPOINT: str = "/appointment/schedule"
 
     # Default facility ID
-    DEFAULT_FACILITY_ID: Optional[str] = None
+    DEFAULT_FACILITY_ID: str = "crmpo1ob0004991hpkvg"  # Tara Hospital default
 
     # FastAPI
     FASTAPI_HOST: str = "0.0.0.0"

@@ -2,14 +2,14 @@
 Streamlit UI for Medical QA and Appointment Booking
 Frontend interface to interact with medical chatbot and appointment booking
 """
+import os
 import streamlit as st
 import requests
 import json
 from typing import List, Dict, Any
-from medical_qa.chat_engine import build_chat_answer
 
-# Backend API URL
-API_BASE_URL = "http://localhost:8001"
+# Backend API URL - use environment variable or default
+API_BASE_URL = os.getenv("FASTAPI_URL", "http://localhost:8000")
 
 st.set_page_config(
     page_title="AarogyaOne - Medical Assistant",
@@ -125,8 +125,11 @@ if st.session_state.current_page == "home":
                 st.rerun()
         
         with col_b:
-            if st.button("💬 Medical Chatbot", use_container_width=True, key="btn_chatbot"):
+            if st.button("💬 Medical QA Support", use_container_width=True, key="btn_chatbot"):
                 st.session_state.current_page = "chatbot"
+                # Clear appointment chat state when entering QA to ensure isolation
+                st.session_state.messages = []
+                st.session_state.session_id = None
                 st.rerun()
 
     st.markdown("---")
@@ -140,6 +143,10 @@ elif st.session_state.current_page == "appointment":
         st.markdown('<div style="font-size: 50px; line-height: 1; margin-left: 20px;">📅</div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<h2 class="main-title">Appointment Booking</h2>', unsafe_allow_html=True)
+
+    # Service Isolation: When in Appointment, ensure no QA state is active
+    if "qa_history" in st.session_state:
+        st.session_state.qa_history = []
 
     if st.session_state.session_id:
         st.info(f"✅ Session Active: {st.session_state.session_id[:8]}...")
@@ -172,7 +179,7 @@ elif st.session_state.current_page == "appointment":
                     "message": prompt,
                     "session_id": st.session_state.session_id
                 }
-                response = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=120)
+                response = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=300)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -207,29 +214,90 @@ elif st.session_state.current_page == "appointment":
                     st.error(error_msg)
 
 
-# ===== MEDICAL CHATBOT PAGE =====
+# ===== MEDICAL QA SUPPORT PAGE =====
 elif st.session_state.current_page == "chatbot":
     col1, col2 = st.columns([1, 8])
     with col1:
         st.markdown('<div style="font-size: 50px; line-height: 1; margin-left: 20px;">💬</div>', unsafe_allow_html=True)
     with col2:
-        st.markdown('<h2 class="main-title">Medical Chatbot</h2>', unsafe_allow_html=True)
+        st.markdown('<h2 class="main-title">Medical QA Support</h2>', unsafe_allow_html=True)
 
-    # Sidebar for Medical QA
+    # Sidebar for Medical QA Support
     with st.sidebar:
         st.divider()
         st.subheader("👤 Patient Info")
-        st.session_state.abha = st.text_input(
-            "ABHA ID (Optional)", 
+        
+        # ABHA ID is Required for document upload but Optional for chat
+        abha_input = st.text_input(
+            "ABHA ID (14 digits)", 
             value=st.session_state.abha,
-            placeholder="Enter your ABHA ID to access documents"
+            placeholder="XX-XXXX-XXXX-XXXX",
+            help="Required for document upload. Format: 12345678901234"
         )
         
+        # Basic validation (extract digits)
+        import re
+        abha_digits = re.sub(r"[-\s]", "", abha_input)
+        if abha_digits:
+            if len(abha_digits) == 14 and abha_digits.isdigit():
+                st.session_state.abha = abha_digits
+                st.success(f"✅ ABHA: {abha_digits[:2]}-{abha_digits[2:6]}-{abha_digits[6:10]}-{abha_digits[10:14]}")
+            else:
+                st.error("⚠️ ABHA must be 14 digits.")
+                st.session_state.abha = ""
+        else:
+            st.session_state.abha = ""
+
+        st.divider()
+        st.subheader("📁 Document Upload")
+        uploaded_file = st.file_uploader(
+            "Upload Reports/Prescriptions", 
+            type=["pdf", "jpg", "jpeg", "png"],
+            help="ABHA ID is required for upload."
+        )
+
+        if uploaded_file:
+            if not st.session_state.abha:
+                st.warning("⚠️ Please enter a valid 14-digit ABHA ID first.")
+            else:
+                if st.button("🚀 Process Document", use_container_width=True):
+                    with st.spinner("Processing file..."):
+                        try:
+                            # Call backend upload endpoint
+                            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+                            res = requests.post(
+                                f"{API_BASE_URL}/api/qa/upload/{st.session_state.abha}",
+                                files=files,
+                                timeout=600
+                            )
+                            if res.status_code == 200:
+                                st.success(f"✅ {uploaded_file.name} uploaded and queued!")
+                                # Reset file uploader state if needed (Streamlit limitation)
+                            else:
+                                st.error(f"❌ Upload failed: {res.text}")
+                        except Exception as e:
+                            st.error(f"❌ Connection error: {e}")
+
+        st.divider()
         if st.button("🔄 Clear Chat", use_container_width=True):
+            st.session_state.messages = []
             st.session_state.qa_history = []
             st.rerun()
 
-    st.info("💡 Ask me anything about medical topics or your uploaded documents!")
+    # Document Status List
+    if st.session_state.abha:
+        try:
+            files_res = requests.get(f"{API_BASE_URL}/api/qa/files/{st.session_state.abha}")
+            if files_res.status_code == 200:
+                indexed = files_res.json().get("indexed_files", [])
+                if indexed:
+                    with st.expander("📄 Your Uploaded Documents", expanded=False):
+                        for f in indexed:
+                            st.write(f"- {f}")
+        except:
+            pass
+
+    st.info("💡 Ask me about your health or your uploaded medical documents!")
     st.markdown("---")
 
     # Chat interface
@@ -255,14 +323,19 @@ elif st.session_state.current_page == "chatbot":
                     if i + 1 < len(st.session_state.messages):
                         user_msg = st.session_state.messages[i].get("content", "")
                         assist_msg = st.session_state.messages[i + 1].get("content", "")
-                        history.append((user_msg, assist_msg))
+                        history.append([user_msg, assist_msg])
                 
-                # Get answer from medical QA engine
-                answer = build_chat_answer(
-                    query=prompt,
-                    abha=st.session_state.abha,
-                    history=history
-                )
+                # Get answer from medical QA engine via backend API
+                payload = {
+                    "abha_number": st.session_state.abha,
+                    "query": prompt,
+                    "history": history
+                }
+                res = requests.post(f"{API_BASE_URL}/api/qa/chat/", json=payload, timeout=120)
+                if res.status_code == 200:
+                    answer = res.json().get("answer", "No answer received.")
+                else:
+                    answer = f"⚠️ Backend Error: {res.text}"
                 
                 # Display assistant message
                 with st.chat_message("assistant"):

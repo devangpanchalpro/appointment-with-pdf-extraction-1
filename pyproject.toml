@@ -19,6 +19,8 @@ dependencies = [
     "requests",
     "google-genai",
     "sentence-transformers",
+    "torch",
+    "torchvision",
     "faiss-cpu",
     "pdf2image",
     "PyPDF2",

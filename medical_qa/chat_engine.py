@@ -1,5 +1,7 @@
 import logging
-from medical_qa.config import client, GEMINI_MODEL
+import os
+import json
+from medical_qa.config import client, GEMINI_MODEL, BASE_DIR
 from medical_qa.rag_store import rag
 
 logger = logging.getLogger(__name__)
@@ -15,7 +17,7 @@ SYS_WITH_DOCS = (
     "5. Flag abnormal results clearly with ⚠️\n"
     "6. Always cite which document/file you found data in.\n"
     "7. Never fabricate values.\n"
-    "8. Support Hindi and Gujarati language questions.\n"
+    "8. IMPORTANT: ALWAYS answer in the exact same language as the user's question. If asked in English, reply in English. If asked in Hindi, reply in Hindi.\n"
 )
 
 SYS_NO_DOCS = (
@@ -25,7 +27,7 @@ SYS_NO_DOCS = (
     "- Provide detailed, evidence-based medical information\n"
     "- Explain medications: purpose, dosage, side effects, precautions\n"
     "- Always recommend consulting a qualified doctor for personal medical decisions\n"
-    "- Support Hindi and Gujarati language questions\n"
+    "- IMPORTANT: ALWAYS answer in the exact same language as the user's question. If asked in English, reply in English.\n"
 )
 
 SEP = "\n\n---\n\n"
@@ -36,13 +38,38 @@ def build_chat_answer(query: str, abha: str, history: list) -> str:
     logger.info(f"Query: {query}")
     
     user_files = rag.files(abha) if abha else []
+    
+    # Fallback to check disk if RAG is empty (due to restart/persistence)
+    if not user_files and abha:
+        user_dir = os.path.join(BASE_DIR, abha)
+        if os.path.exists(user_dir):
+            user_files = [f for f in os.listdir(user_dir) if f.endswith(".json")]
+            
     has_docs   = bool(user_files)
     logger.info(f"Has Documents: {has_docs} | Files: {user_files}")
 
     if has_docs:
-        hits    = rag.search(query, abha, top_k=7)
-        logger.info(f"RAG Search: {len(hits)} hits found")
-        context = SEP.join(h["text"] for h in hits) if hits else "No relevant context found."
+        # Check if user wants a summary of all documents
+        q_lower = query.lower()
+        is_summary = any(w in q_lower for w in ["summary", "summarize", "all document", "all report", "badha document", "badha report", "saare document", "sare document", "saare report", "saransh"])
+        
+        user_dir = os.path.join(BASE_DIR, abha)
+        if is_summary and os.path.exists(user_dir):
+            logger.info("Summary requested: loading all JSON data unconditionally.")
+            jsons_data = []
+            for fname in os.listdir(user_dir):
+                if fname.endswith(".json"):
+                    try:
+                        with open(os.path.join(user_dir, fname), "r", encoding="utf-8") as f:
+                            jsons_data.append(f"--- {fname} ---\n{f.read()}")
+                    except: pass
+            context = "\n\n".join(jsons_data) if jsons_data else "No readable data found."
+            hits = [{"meta": {"filename": f}} for f in user_files]  # Fake hits for citation
+        else:
+            hits    = rag.search(query, abha, top_k=7)
+            logger.info(f"RAG Search: {len(hits)} hits found")
+            context = SEP.join(h["text"] for h in hits) if hits else "No relevant context found."
+            
         system  = SYS_WITH_DOCS
         user_content = (
             f"Patient ABHA: {abha}\n"

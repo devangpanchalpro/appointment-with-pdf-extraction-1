@@ -1,0 +1,134 @@
+{
+  "source_file": "WhatsApp Image 2026-04-01 at 10.18.47 AM.jpeg",
+  "extraction_timestamp": "2026-04-01T06:42:32.680849",
+  "pages": [
+    {
+      "document_type": "prescription",
+      "document_subtype": null,
+      "language_detected": "English",
+      "overall_confidence": "medium",
+      "extraction_timestamp": "2024-07-25T12:00:00Z",
+      "patient_info": {
+        "date_of_prescription": "2025-02-14",
+        "age": "1 day",
+        "gender": null,
+        "blood_pressure": {
+          "systolic": "116",
+          "diastolic": "70",
+          "unit": "mmHg"
+        },
+        "general_instructions": [
+          {
+            "instruction": "NBM",
+            "details": "Nil By Mouth for 4 weeks",
+            "duration": "4 WZ"
+          }
+        ]
+      },
+      "document_data": {
+        "header": {
+          "advice_header": "ADW"
+        },
+        "prescriptions": [
+          {
+            "drug_name": "Mikacin",
+            "dosage_value": null,
+            "dosage_unit": "mg",
+            "frequency": "QD",
+            "route": "IV",
+            "duration": null,
+            "comments": null
+          },
+          {
+            "drug_name": "Ncef 8B",
+            "dosage_value": "1.5",
+            "dosage_unit": "g",
+            "frequency": "TDS",
+            "route": "IV",
+            "duration": null,
+            "comments": null
+          },
+          {
+            "drug_name": "Metro",
+            "dosage_value": "400",
+            "dosage_unit": "mg",
+            "frequency": "TDS",
+            "route": "IV",
+            "duration": null,
+            "comments": null
+          },
+          {
+            "drug_name": "Esoteri",
+            "dosage_value": null,
+            "dosage_unit": null,
+            "frequency": "BD",
+            "route": "IV",
+            "duration": null,
+            "comments": null
+          },
+          {
+            "drug_name": "Euset",
+            "dosage_value": "7",
+            "dosage_unit": "v?",
+            "frequency": "TDS",
+            "route": null,
+            "duration": null,
+            "comments": null
+          },
+          {
+            "drug_name": "N3 (ZIT)",
+            "dosage_value": null,
+            "dosage_unit": null,
+            "frequency": "Continuous",
+            "route": "IV infusion",
+            "duration": null,
+            "infusion_rate": {
+              "value": "150",
+              "unit": "mu/hr"
+            },
+            "comments": null
+          }
+        ]
+      },
+      "doctor_info": {
+        "name": "DR. ALPESH N. PRAJAPATI",
+        "qualification": "M.D.(MEDICINE)",
+        "registration_no": "G-21281",
+        "hospital_name": "RHYTHM MULTISPECIALITY HOSPITAL",
+        "hospital_location": "KADI"
+      },
+      "abnormal_flags": [],
+      "handwritten_fields": [
+        "date_of_prescription",
+        "age",
+        "blood_pressure",
+        "nil_by_mouth",
+        "advice_header",
+        "prescriptions"
+      ],
+      "missing_critical_fields": [],
+      "raw_text": "ADW\nmg mikacin / iv QD\nncef 8B1.5g iv TDS\nmetro 400 iv TDS\nesoteri iv BD\nEuset 7v TDS\nN3 (ZIT) toptw @ 150 mu/hr\n1 4 FEB 2025\nAge X (1) day\nBP 116/70 mmHg\nNBM for\n4 WZ\nDR. ALPESH N. PRAJAPATI\nM.D.(MEDICINE), REG. NO. G-21281\nRHYTHM MULTISPECIALITY HOSPITAL, KADI",
+      "_page_number": 1
+    }
+  ],
+  "document_type": "prescription",
+  "document_subtype": null,
+  "patient_info": {
+    "date_of_prescription": "2025-02-14",
+    "age": "1 day",
+    "gender": null,
+    "blood_pressure": {
+      "systolic": "116",
+      "diastolic": "70",
+      "unit": "mmHg"
+    },
+    "general_instructions": [
+      {
+        "instruction": "NBM",
+        "details": "Nil By Mouth for 4 weeks",
+        "duration": "4 WZ"
+      }
+    ]
+  },
+  "overall_confidence": "medium"
+}

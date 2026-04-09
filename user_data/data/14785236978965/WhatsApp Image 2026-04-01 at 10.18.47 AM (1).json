@@ -1,0 +1,202 @@
+{
+  "source_file": "WhatsApp Image 2026-04-01 at 10.18.47 AM (1).jpeg",
+  "extraction_timestamp": "2026-04-01T07:05:16.071791",
+  "pages": [
+    {
+      "document_type": "lab_report",
+      "document_subtype": "biochemistry_report",
+      "language_detected": "English",
+      "overall_confidence": "high",
+      "extraction_timestamp": "2024-07-29T12:00:00Z",
+      "patient_info": {
+        "patient_id": null,
+        "name": {
+          "first_name": "Riddhiben",
+          "middle_name": "D",
+          "last_name": "Barot",
+          "full_name": "Mrs Riddhiben D Barot",
+          "confidence_score": 0.99
+        },
+        "gender": {
+          "value": "Female",
+          "confidence_score": 0.99
+        },
+        "age": {
+          "value": "27 Y",
+          "unit": "Years",
+          "confidence_score": 0.99
+        },
+        "date_of_birth": null,
+        "contact_details": null,
+        "address": null,
+        "referring_doctor": {
+          "name": "Dr. Alpesh N Prajapati M.D.",
+          "specialization": "Medicine",
+          "confidence_score": 0.98
+        }
+      },
+      "document_data": {
+        "laboratory_name": {
+          "value": "Sterling Accuris Pathology lab that cares",
+          "confidence_score": 0.95
+        },
+        "client_information": {
+          "client_name": {
+            "value": "Rhythm Multispeciality Hospital@Kadi HLM",
+            "confidence_score": 0.98
+          },
+          "location": {
+            "value": "Coco",
+            "confidence_score": 0.95
+          },
+          "status": {
+            "value": "Final",
+            "confidence_score": 0.99
+          },
+          "approved_on": {
+            "date": "15-Feb-2025",
+            "time": "10:39",
+            "confidence_score": 0.99
+          },
+          "printed_on": {
+            "date": "15-Feb-2025",
+            "time": "10:40",
+            "confidence_score": 0.99
+          },
+          "process_at": {
+            "value": "81, SAWIP KADI,RHYTHM Medical and Hear Hospital",
+            "confidence_score": 0.97
+          }
+        },
+        "report_details": {
+          "lab_id": {
+            "value": "022561300853",
+            "confidence_score": 0.99
+          },
+          "registration_on": {
+            "date": "15-Feb-2025",
+            "time": "09:57",
+            "confidence_score": 0.99
+          },
+          "collected_on": {
+            "value": "non",
+            "confidence_score": 0.9
+          },
+          "sample_type": {
+            "value": "Serum",
+            "confidence_score": 0.99
+          }
+        },
+        "biochemistry_results": [
+          {
+            "test_name": "Creatinine, serum",
+            "method": "Jaffe Oxidase",
+            "value": "0.61",
+            "unit": "mg/dL",
+            "reference_range": "0.5 - 1.3",
+            "status": "Normal",
+            "confidence_score": 0.99
+          },
+          {
+            "test_name": "Potassium (K+)",
+            "method": "Direct-ISE",
+            "value": "2.9",
+            "unit": "mmol/L",
+            "reference_range": "3.5 - 5.1",
+            "status": "Low",
+            "confidence_score": 0.99
+          },
+          {
+            "test_name": "C-Reactive Protein (CRP)",
+            "method": "immunoturbidometry",
+            "value": "32.90",
+            "unit": "mg/L",
+            "reference_range": "0 - 5",
+            "status": "High",
+            "confidence_score": 0.99
+          }
+        ],
+        "notes": [
+          {
+            "type": "CRP Interpretation",
+            "content": "CRP is an acute phase reactant which is used in inflammatory disorders for monitoring course and effect of therapy. It is most useful as an indicator of activity in rheumatoid arthritis, rheumatic fever, tissue injury or necrosis and infections. As compared to ESR, CRP shows an earlier rise in inflammatory disorders which begins in 4-6 hrs, the intensity of the rise being higher than ESR and the recovery being earlier than ESR.",
+            "confidence_score": 0.98
+          }
+        ],
+        "pathologist": {
+          "name": "agar Hingrajia",
+          "title": "Pathologist...",
+          "qualifications": "MD (Path)",
+          "signature_present": true,
+          "confidence_score": 0.95
+        }
+      },
+      "abnormal_flags": [
+        {
+          "test": "Potassium (K+)",
+          "status": "Low",
+          "value": "2.9",
+          "unit": "mmol/L",
+          "reference_range": "3.5 - 5.1",
+          "confidence_score": 0.99
+        },
+        {
+          "test": "C-Reactive Protein (CRP)",
+          "status": "High",
+          "value": "32.90",
+          "unit": "mg/L",
+          "reference_range": "0 - 5",
+          "confidence_score": 0.99
+        }
+      ],
+      "handwritten_fields": [
+        {
+          "field_name": "Pathologist Signature",
+          "value": "signature of agar Hingrajia",
+          "bounding_box": [
+            1000,
+            959,
+            1000,
+            999,
+            1000,
+            999
+          ],
+          "confidence_score": 0.9
+        }
+      ],
+      "missing_critical_fields": [],
+      "raw_text": "STERLING ACCURIS Pathology lab that cares\nClient/Location Information\nClient Name: Rhythm Multispeciality Hospital@Kadi HLM\nLocation: Coco\nStatus: Final\nApproved On: 15-Feb-2025 10:39\nPrinted On: 15-Feb-2025 10:40\nProcess At: 81, SAWIP KADI,RHYTHM Medical and Hear\nHospital\nBiological Ref. Interval\n0.5 - 1.3\n3.5 - 5.1\n0-5\nEnd Of Report\nPathologist...\nMD (Path)\nagar Hingrajia\nScan QR code to check\nreport authenticity\nLABORATORY TEST REPORT\nSample Information\nLab Id: 022561300853\nRegistration on: 15-Feb-2025 09:57\nCollected on: non\nCollected at\nSample Type: Serum\nBiochemistry\nResult\nUnit\nmg/dL\nmmol/L\nmg/L\n0.61\nL 2.9\nH 32.90\nPATIENT INFORMATION\nPatient No\nName: Mrs Riddhiben D Barot\nGender / Age: Female / 27 Y\nRef. Id:\nRef. By: Dr. Alpesh N Prajapati M.D.\n[Medicine]\nTest\nCreatinine, serum\nJaffe Oxidase\nPotassium (K+)\nDirect-ISE\nC-Reactive Protein (CRP)\nimmunoturbidometry\nNote: CRP is an acute phase reactant which is used in inflammatory disorders for monitoring course and effect of therapy. It is most useful as an indicator of activity in rheumatoid arthritis, rheumatic fever, tissue injury or necrosis and infections. As compared to ESR, CRP shows an earlier rise in inflammatory disorders which begins in 4-6 hrs, the intensity of the rise being higher than ESR and the recovery being earlier than ESR.",
+      "_page_number": 1
+    }
+  ],
+  "document_type": "lab_report",
+  "document_subtype": "biochemistry_report",
+  "patient_info": {
+    "patient_id": null,
+    "name": {
+      "first_name": "Riddhiben",
+      "middle_name": "D",
+      "last_name": "Barot",
+      "full_name": "Mrs Riddhiben D Barot",
+      "confidence_score": 0.99
+    },
+    "gender": {
+      "value": "Female",
+      "confidence_score": 0.99
+    },
+    "age": {
+      "value": "27 Y",
+      "unit": "Years",
+      "confidence_score": 0.99
+    },
+    "date_of_birth": null,
+    "contact_details": null,
+    "address": null,
+    "referring_doctor": {
+      "name": "Dr. Alpesh N Prajapati M.D.",
+      "specialization": "Medicine",
+      "confidence_score": 0.98
+    }
+  },
+  "overall_confidence": "high"
+}

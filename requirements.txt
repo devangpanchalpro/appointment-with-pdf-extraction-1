@@ -27,6 +27,8 @@ requests
 
 google-genai
 sentence-transformers
+torch
+torchvision
 faiss-cpu
 Pillow
 pdf2image

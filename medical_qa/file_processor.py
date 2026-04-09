@@ -1,6 +1,7 @@
 import asyncio
-import logging
+import logging, os
 from typing import Dict, List
+from medical_qa.config import BASE_DIR
 from medical_qa.document_parse import doc_parser, SUPPORTED_EXTS
 from medical_qa.rag_store import rag
 
@@ -23,6 +24,16 @@ async def _process_single(fpath_or_bytes, filename: str, abha: str, is_bytes=Fal
 
         logger.info(f"Extraction complete for {filename}. Extracting text for RAG...")
         text = doc_parser.full_text_for_rag(result)
+        
+        # --- Save path logic ---
+        out_dir = os.path.join(BASE_DIR, abha)
+        os.makedirs(out_dir, exist_ok=True)
+        
+        # Save original file if bytes provided
+        if is_bytes:
+            with open(os.path.join(out_dir, filename), "wb") as f:
+                f.write(fpath_or_bytes)
+        
         rag.add(text, filename, abha)
         doc_parser.save_json(result, abha)
         parsed_store.setdefault(abha, []).append(result)

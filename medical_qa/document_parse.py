@@ -1,4 +1,4 @@
-import os, json, re, time, tempfile
+import os, json, re, time, tempfile, asyncio
 from pathlib import Path
 from datetime import datetime
 from typing import List
@@ -86,7 +86,6 @@ class DynamicDocumentParser:
             # use await for the async call if the client supports it, 
             # but google-genai client.models.generate_content is normally sync in this version
             # let's check if it has an async version or use run_in_executor
-            import asyncio
             loop = asyncio.get_event_loop()
             
             def call_sync():
@@ -158,7 +157,6 @@ class DynamicDocumentParser:
         
         tasks = []
         if ext == ".pdf":
-            import asyncio
             loop = asyncio.get_event_loop()
             imgs = await loop.run_in_executor(None, self._pdf_bytes_to_imgs, data)
             for i, p in enumerate(imgs):
@@ -194,7 +192,7 @@ class DynamicDocumentParser:
         return "\n\n".join(texts)
 
     def save_json(self, result: dict, abha: str):
-        out_dir = Path(BASE_DIR) / "data" / "extractions" / abha
+        out_dir = Path(BASE_DIR) / abha
         out_dir.mkdir(parents=True, exist_ok=True)
         fname = Path(result["source_file"]).stem + ".json"
         with open(out_dir / fname, "w", encoding="utf-8") as f:

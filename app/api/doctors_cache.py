@@ -18,7 +18,7 @@ class DoctorsCache:
     def __init__(self):
         self._doctors: List[Dict] = []
         self._last_fetched: datetime = None
-        self._cache_duration = timedelta(minutes=15)  # Refresh every 15 min
+        self._cache_duration = timedelta(minutes=5)  # Refresh every 5 min (cache aggressively)
     
     async def get_doctors(
         self,
