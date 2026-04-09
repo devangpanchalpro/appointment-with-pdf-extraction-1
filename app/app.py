@@ -15,6 +15,8 @@ from app.agent.agent import appointment_agent, session_manager
 from app.mcp.mcp_client import mcp_client
 from app.api.doctors_cache import doctors_cache
 from app.config.settings import settings
+from app.api.auth import verify_jwt
+from fastapi import Depends
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -72,7 +74,7 @@ class ChatResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.get("/")
+@app.get("/", tags=["General"])
 async def root():
     return {
         "app": settings.APP_NAME,
@@ -86,7 +88,7 @@ async def root():
     }
 
 
-@app.get("/health")
+@app.get("/health", tags=["General"])
 async def health():
     import httpx
     ollama_ok = False
@@ -110,7 +112,8 @@ async def health():
 @app.get("/doctors", tags=["Doctors"])
 async def get_doctors(
     facility_id: Optional[str] = None,
-    refresh: bool = False
+    refresh: bool = False,
+    token: dict = Depends(verify_jwt)
 ):
     """
     GET /doctors
@@ -130,7 +133,7 @@ async def get_doctors(
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Agent"])
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, token: dict = Depends(verify_jwt)):
     """
     POST /chat
     
@@ -159,7 +162,7 @@ async def chat(req: ChatRequest):
 
 
 @app.get("/session/{session_id}", tags=["Session"])
-async def get_session(session_id: str):
+async def get_session(session_id: str, token: dict = Depends(verify_jwt)):
     s = session_manager.get(session_id)
     return {
         "session_id": session_id,
@@ -175,10 +178,7 @@ async def reset_session(session_id: str):
     return {"message": "Session reset", "session_id": session_id}
 
 
-@app.get("/mcp/tools", tags=["MCP"])
-async def list_mcp_tools():
-    tools = await mcp_client.list_tools()
-    return {"count": len(tools), "tools": tools}
+
 
 
 

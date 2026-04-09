@@ -1,7 +1,8 @@
 import re, os, shutil
 from pathlib import Path
-from fastapi import UploadFile, File, HTTPException
+from fastapi import UploadFile, File, HTTPException, Depends
 from fastapi.responses import FileResponse, HTMLResponse
+from app.api.auth import verify_jwt
 from pydantic import BaseModel, validator
 from medical_qa.config import BASE_DIR
 from medical_qa.document_parse import SUPPORTED_EXTS
@@ -28,8 +29,8 @@ class ChatRequest(BaseModel):
 
 def register_qa_routes(app):
 
-    @app.post("/api/qa/upload/{abha_number}")
-    async def qa_upload(abha_number: str, file: UploadFile = File(...)):
+    @app.post("/api/qa/upload/{abha_number}", tags=["Medical QA"])
+    async def qa_upload(abha_number: str, file: UploadFile = File(...), token: dict = Depends(verify_jwt)):
         digits = re.sub(r"[-\s]", "", abha_number.strip())
         if not digits.isdigit() or len(digits) != 14:
             raise HTTPException(400, "ABHA number must be exactly 14 digits")
@@ -49,8 +50,8 @@ def register_qa_routes(app):
         }
 
 
-    @app.post("/api/qa/chat/")
-    async def qa_chat(req: ChatRequest):
+    @app.post("/api/qa/chat/", tags=["Medical QA"])
+    async def qa_chat(req: ChatRequest, token: dict = Depends(verify_jwt)):
         answer  = build_chat_answer(req.query, req.abha_number, req.history)
         sources = rag.files(req.abha_number) if req.abha_number else []
         return {
@@ -60,8 +61,8 @@ def register_qa_routes(app):
             "abha":     req.abha_number
         }
 
-    @app.get("/api/qa/files/{abha_number}")
-    async def qa_files(abha_number: str):
+    @app.get("/api/qa/files/{abha_number}", tags=["Medical QA"])
+    async def qa_files(abha_number: str, token: dict = Depends(verify_jwt)):
         digits = re.sub(r"[-\s]", "", abha_number.strip())
         if not digits.isdigit() or len(digits) != 14:
             raise HTTPException(400, "Invalid ABHA number")
@@ -83,16 +84,16 @@ def register_qa_routes(app):
             "processing_status": upload_progress.get(digits, {})
         }
 
-    @app.get("/api/qa/download/{abha_number}/{filename}")
-    async def qa_download(abha_number: str, filename: str):
+    @app.get("/api/qa/download/{abha_number}/{filename}", tags=["Medical QA"])
+    async def qa_download(abha_number: str, filename: str, token: dict = Depends(verify_jwt)):
         digits = re.sub(r"[-\s]", "", abha_number.strip())
         path   = os.path.join(BASE_DIR, digits, filename)
         if not os.path.exists(path):
             raise HTTPException(404, f"File not found: {filename}")
         return FileResponse(path, media_type="application/json", filename=filename)
 
-    @app.get("/api/qa/upload-form", response_class=HTMLResponse)
-    async def upload_form():
+    @app.get("/api/qa/upload-form", response_class=HTMLResponse, tags=["Medical QA"])
+    async def upload_form(token: dict = Depends(verify_jwt)):
         return """
         <html><body>
           <h3>Single PDF/Image upload (only one file)</h3>
@@ -104,8 +105,8 @@ def register_qa_routes(app):
         """
 
 
-    @app.delete("/api/qa/clear/{abha_number}")
-    async def qa_clear(abha_number: str):
+    @app.delete("/api/qa/clear/{abha_number}", tags=["Medical QA"])
+    async def qa_clear(abha_number: str, token: dict = Depends(verify_jwt)):
         digits = re.sub(r"[-\s]", "", abha_number.strip())
         rag.clear(digits)
         parsed_store.pop(digits, None)

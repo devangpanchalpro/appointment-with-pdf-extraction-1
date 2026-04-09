@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # Timeout for Ollama LLM requests (seconds)
     OLLAMA_TIMEOUT: int = 300
 
+    # JWT Authentication
+    JWT_SECRET_KEY: str = "90991e429da28cc147df206aa60e675cdb4f9e4c0e0f785f2e7c7a87305b8ac6"  # Set via .env
+    JWT_ALGORITHM: str = "HS256"
+
     # External Hospital API — replace with your real API
     EXTERNAL_API_BASE_URL_DEV: str = "https://dev-hmis-api.aarogya.one/api/v1"
     EXTERNAL_API_BASE_URL_PROD: str = "https://beta-hmis.aarogya.one/api/v1"
