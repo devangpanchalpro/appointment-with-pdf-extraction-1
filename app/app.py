@@ -15,8 +15,8 @@ from app.agent.agent import appointment_agent, session_manager
 from app.mcp.mcp_client import mcp_client
 from app.api.doctors_cache import doctors_cache
 from app.config.settings import settings
+from fastapi import Depends, Body
 from app.api.auth import verify_jwt
-from fastapi import Depends
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ class ChatResponse(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", tags=["General"])
-async def root():
+async def root(token: dict = Depends(verify_jwt)):
     return {
         "app": settings.APP_NAME,
         "version": settings.APP_VERSION,
@@ -84,12 +84,13 @@ async def root():
             "chat": "POST /chat",
             "doctors": "GET /doctors",
             "health": "GET /health",
+            "token": "POST /token"
         }
     }
 
 
 @app.get("/health", tags=["General"])
-async def health():
+async def health(token: dict = Depends(verify_jwt)):
     import httpx
     ollama_ok = False
     try:
@@ -116,20 +117,126 @@ async def get_doctors(
     token: dict = Depends(verify_jwt)
 ):
     """
-    GET /doctors
-    
-    Fetch doctors with available slots from Aarogya API.
-    Data is cached for 15 minutes unless refresh=true.
-    
-    Query params:
-      - facility_id: Optional facility filter
-      - refresh: Force refresh cache (default: false)
+    GET /doctors — Legacy endpoint (cached availability data).
     """
     doctors = await doctors_cache.get_doctors(facility_id, force_refresh=refresh)
     return {
         "count": len(doctors),
         "doctors": doctors,
     }
+
+
+# ── MCP-aligned 4-Step Booking API ───────────────────────────────────────────
+
+from app.api.external_client import aarogya_api as api_client
+
+
+@app.get("/api/doctors-list", tags=["Booking Flow"])
+async def api_get_doctors_list(
+    facility_id: Optional[str] = None,
+    page_size: int = 20,
+    skip_count: int = 0,
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Step 1: GET /api/doctors-list
+    Fetches the full list of available doctors at a facility.
+    """
+    from app.mcp.mcp_server import get_doctors_list
+    result = await get_doctors_list(
+        facility_id=facility_id,
+        page_size=page_size,
+        skip_count=skip_count,
+    )
+    import json
+    return json.loads(result)
+
+
+@app.get("/api/doctor-facilities", tags=["Booking Flow"])
+async def api_get_doctor_facilities(
+    health_professional_id: str,
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Step 2: GET /api/doctor-facilities
+    Fetches all facilities where a specific doctor is available.
+    """
+    from app.mcp.mcp_server import get_doctor_facilities
+    result = await get_doctor_facilities(
+        health_professional_id=health_professional_id,
+    )
+    import json
+    return json.loads(result)
+
+
+@app.get("/api/doctor-availability", tags=["Booking Flow"])
+async def api_get_doctor_availability(
+    health_professional_id: str,
+    facility_id: str,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Step 3: GET /api/doctor-availability
+    Fetches available appointment slots for a doctor at a facility.
+    """
+    from app.mcp.mcp_server import get_doctor_availability
+    result = await get_doctor_availability(
+        health_professional_id=health_professional_id,
+        facility_id=facility_id,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    import json
+    return json.loads(result)
+
+
+class BookAppointmentRequest(BaseModel):
+    first_name: str
+    last_name: str
+    mobile: str
+    gender: int = 1
+    birth_date: str
+    health_professional_id: str
+    facility_id: str
+    slot_date: str
+    slot_start_time: str
+    symptoms: Optional[list] = None
+    middle_name: str = ""
+    pin_code: str = ""
+    address: str = ""
+    area: str = ""
+
+
+@app.post("/api/appointments/schedule", tags=["Booking Flow"])
+async def api_book_appointment(
+    req: BookAppointmentRequest,
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Step 4: POST /api/appointments/schedule
+    Books the selected appointment slot with all patient details.
+    """
+    from app.mcp.mcp_server import book_appointment
+    result = await book_appointment(
+        first_name=req.first_name,
+        last_name=req.last_name,
+        mobile=req.mobile,
+        gender=req.gender,
+        birth_date=req.birth_date,
+        health_professional_id=req.health_professional_id,
+        facility_id=req.facility_id,
+        slot_date=req.slot_date,
+        slot_start_time=req.slot_start_time,
+        symptoms=req.symptoms,
+        middle_name=req.middle_name,
+        pin_code=req.pin_code,
+        address=req.address,
+        area=req.area,
+    )
+    import json
+    return json.loads(result)
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Agent"])
@@ -173,7 +280,7 @@ async def get_session(session_id: str, token: dict = Depends(verify_jwt)):
 
 
 @app.delete("/session/{session_id}", tags=["Session"])
-async def reset_session(session_id: str):
+async def reset_session(session_id: str, token: dict = Depends(verify_jwt)):
     appointment_agent.reset(session_id)
     return {"message": "Session reset", "session_id": session_id}
 

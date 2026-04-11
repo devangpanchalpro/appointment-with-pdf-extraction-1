@@ -1,7 +1,14 @@
 """
 Aarogya HMIS API Client
+
+Endpoints:
+  1. GET  /doctors                  → List doctors at a facility
+  2. GET  /doctors/{id}/facilities  → List facilities for a doctor
+  3. GET  /doctors/availability     → Doctor availability / time slots
+  4. POST /appointment/schedule     → Book an appointment
 """
 import httpx
+import json
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -22,6 +29,82 @@ class AarogyaAPIClient:
             "x-api-key": self.api_key,
         }
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # 1. GET /doctors — List doctors at a facility
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def get_doctors_list(
+        self,
+        facility_id: str,
+        page_size: int = 20,
+        skip_count: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """
+        GET /doctors?FacilityId=...&PageSize=...&SkipCount=...
+        Returns list of doctor objects with name, healthProfessionalId, etc.
+        """
+        params = {
+            "FacilityId": facility_id,
+            "PageSize": page_size,
+            "SkipCount": skip_count,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                url = f"{self.base_url}/doctors"
+                logger.info(f"API GET: {url} | params: {params}")
+                response = await client.get(url, headers=self.headers, params=params)
+                response.raise_for_status()
+                data = response.json()
+
+                # Debug log
+                logger.info(f"GET /doctors response keys: {list(data.keys()) if isinstance(data, dict) else 'list'}")
+
+                if isinstance(data, dict) and "result" in data:
+                    return data["result"]
+                elif isinstance(data, list):
+                    return data
+                else:
+                    return []
+        except Exception as e:
+            logger.error(f"API Error (get_doctors_list): {str(e)}")
+            return []
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 2. GET /doctors/{id}/facilities — Facilities for a specific doctor
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def get_doctor_facilities(
+        self,
+        health_professional_id: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        GET /doctors/{healthProfessionalId}/facilities
+        Returns list of facility objects with facilityId, name, address, slots.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                url = f"{self.base_url}/doctors/{health_professional_id}/facilities"
+                logger.info(f"API GET: {url}")
+                response = await client.get(url, headers=self.headers)
+                response.raise_for_status()
+                data = response.json()
+
+                logger.info(f"GET /doctors/{health_professional_id}/facilities response keys: {list(data.keys()) if isinstance(data, dict) else 'list'}")
+
+                if isinstance(data, dict) and "result" in data:
+                    return data["result"]
+                elif isinstance(data, list):
+                    return data
+                else:
+                    return []
+        except Exception as e:
+            logger.error(f"API Error (get_doctor_facilities): {str(e)}")
+            return []
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 3. GET /doctors/availability — Time slots for doctor at facility
+    # ══════════════════════════════════════════════════════════════════════════
+
     async def get_doctors_availability(
         self,
         facility_id: str,
@@ -36,7 +119,6 @@ class AarogyaAPIClient:
         if not from_date:
             from_date = datetime.now().strftime("%Y-%m-%d")
         if not to_date:
-            # Expand window from 2 days to 7 days to match periodic API availability expectations.
             to_date = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
         params = {
             "fromDate": from_date,
@@ -49,19 +131,12 @@ class AarogyaAPIClient:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 url = f"{self.base_url}{settings.DOCTORS_AVAILABILITY_ENDPOINT}"
-                logger.info(f"API: {url} | params: {params}")
+                logger.info(f"API GET: {url} | params: {params}")
                 response = await client.get(url, headers=self.headers, params=params)
                 response.raise_for_status()
                 data = response.json()
-                
-                # RAW API PRINT TO TERMINAL
-                print("\n" + "="*50)
-                print("RAW EXTERNAL API RESPONSE (Doctors/availibility)")
-                print("="*50)
-                import json
-                print(json.dumps(data, indent=4))
-                print("="*50 + "\n")
 
+                logger.info(f"GET /doctors/availability response: {str(data)[:200]}")
 
                 if isinstance(data, dict) and "result" in data:
                     doctors = []
@@ -82,8 +157,12 @@ class AarogyaAPIClient:
                 else:
                     return []
         except Exception as e:
-            logger.error(f"API Error: {str(e)}")
+            logger.error(f"API Error (get_doctors_availability): {str(e)}")
             return []
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 4. POST /appointment/schedule — Book appointment
+    # ══════════════════════════════════════════════════════════════════════════
 
     async def schedule_appointment(
         self, booking_request: AppointmentScheduleRequest
@@ -96,38 +175,14 @@ class AarogyaAPIClient:
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 url = f"{self.base_url}{settings.BOOK_APPOINTMENT_ENDPOINT}"
-                logger.info(f"Booking API: {url}")
-                
-                # PRINT REQUEST BODY TO TERMINAL
-                print("\n" + "!"*50)
-                print("FINAL APPOINTMENT REQUEST BODY (JSON)")
-                print("!"*50)
-                import json
-                print(json.dumps(payload, indent=4))
-                print("!"*50 + "\n")
+                logger.info(f"API POST: {url}")
+                logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
 
-                logger.debug(f"Payload: {payload}")
                 response = await client.post(url, headers=self.headers, json=payload)
                 response.raise_for_status()
                 result = response.json()
 
-                # RAW API PRINT TO TERMINAL (Commented out)
-                # print("\n" + "="*50)
-                # print("RAW EXTERNAL API RESPONSE (Appointment/schedule)")
-                # print("="*50)
-                # print(result)
-                # print("="*50 + "\n")
-
-                logger.info(f"Booking Success: {result}")
-                
-                # RAW API PRINT TO TERMINAL
-                print("\n" + "="*50)
-                print("RAW EXTERNAL API RESPONSE (Appointment/schedule)")
-                print("="*50)
-                import json
-                print(json.dumps(result, indent=4))
-                print("="*50 + "\n")
-
+                logger.info(f"Booking response: {str(result)[:300]}")
                 return {"success": True, "data": result}
         except httpx.HTTPStatusError as e:
             error = f"HTTP {e.response.status_code}: {e.response.text}"

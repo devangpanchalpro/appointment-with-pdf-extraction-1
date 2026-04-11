@@ -48,44 +48,44 @@ services:
     networks:
       - medical-qa-network
 
-  # Streamlit Frontend Service
-  streamlit:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: medical-qa-streamlit
-    ports:
-      - "8501:8501"
-    env_file:
-      - .env
-    environment:
-      - ENVIRONMENT=dev
-      - OLLAMA_BASE_URL=http://ollama:11434
-      - LLM_MODEL=llama3.2:latest
-      - EXTERNAL_API_BASE_URL_DEV=https://dev-hmis-api.aarogya.one/api/v1
-      - EXTERNAL_API_KEY_DEV=${EXTERNAL_API_KEY_DEV}
-      - EXTERNAL_API_BASE_URL_PROD=https://beta-hmis.aarogya.one/api/v1
-      - EXTERNAL_API_KEY_PROD=${EXTERNAL_API_KEY_PROD:-}
-      - EXTERNAL_API_TIMEOUT=30
-      - DEFAULT_FACILITY_ID=crmpo1ob0004991hpkvg
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - FASTAPI_URL=http://fastapi:8000
-      - PYTHONUNBUFFERED=1
-    volumes:
-      - ./app:/app/app
-      - ./medical_qa:/app/medical_qa
-      - ./user_data:/app/user_data
-      - ./streamlit_config:/root/.streamlit
-      - ./.env:/app/.env
-    depends_on:
-      - ollama
-      - fastapi
-    command: >
-      bash -c "pip install -e . --default-timeout=1000 --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org &&
-               sleep 10 &&
-               streamlit run streamlit_app.py --server.port=8501 --server.address=0.0.0.0"
-    networks:
-      - medical-qa-network
+#   # Streamlit Frontend Service
+#   streamlit:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     container_name: medical-qa-streamlit
+#     ports:
+#       - "8501:8501"
+#     env_file:
+#       - .env
+#     environment:
+#       - ENVIRONMENT=dev
+#       - OLLAMA_BASE_URL=http://ollama:11434
+#       - LLM_MODEL=llama3.2:latest
+#       - EXTERNAL_API_BASE_URL_DEV=https://dev-hmis-api.aarogya.one/api/v1
+#       - EXTERNAL_API_KEY_DEV=${EXTERNAL_API_KEY_DEV}
+#       - EXTERNAL_API_BASE_URL_PROD=https://beta-hmis.aarogya.one/api/v1
+#       - EXTERNAL_API_KEY_PROD=${EXTERNAL_API_KEY_PROD:-}
+#       - EXTERNAL_API_TIMEOUT=30
+#       - DEFAULT_FACILITY_ID=crmpo1ob0004991hpkvg
+#       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+#       - FASTAPI_URL=http://fastapi:8000
+#       - PYTHONUNBUFFERED=1
+#     volumes:
+#       - ./app:/app/app
+#       - ./medical_qa:/app/medical_qa
+#       - ./user_data:/app/user_data
+#       - ./streamlit_config:/root/.streamlit
+#       - ./.env:/app/.env
+#     depends_on:
+#       - ollama
+#       - fastapi
+#     command: >
+#       bash -c "pip install -e . --default-timeout=1000 --trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org &&
+#                sleep 10 &&
+#                streamlit run streamlit_app.py --server.port=8501 --server.address=0.0.0.0"
+#     networks:
+#       - medical-qa-network
 
 volumes:
   ollama_data:

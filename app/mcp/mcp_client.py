@@ -2,10 +2,13 @@
 ✅ REAL MCP Client using the official `mcp` Python library.
 
 Spawns the MCP server as a subprocess and communicates via stdio transport
-using the actual Model Context Protocol — not a fake HTTP/JSON class.
+using the actual Model Context Protocol.
 
-Used by the agent to call tools like:
-    await mcp_client.call_tool("get_doctors_by_symptoms", {"symptoms": [...]})
+Used by the agent to call tools in sequence:
+    await mcp_client.call_tool("get_doctors_list", {})
+    await mcp_client.call_tool("get_doctor_facilities", {"health_professional_id": "..."})
+    await mcp_client.call_tool("get_doctor_availability", {"health_professional_id": "...", "facility_id": "..."})
+    await mcp_client.call_tool("book_appointment", {...})
 """
 import asyncio
 import json

@@ -32,4 +32,4 @@ torchvision
 faiss-cpu
 Pillow
 pdf2image
-PyJWT
+python-jose[cryptography]

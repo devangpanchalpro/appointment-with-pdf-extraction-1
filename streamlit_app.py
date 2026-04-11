@@ -10,6 +10,8 @@ from typing import List, Dict, Any
 
 # Backend API URL - use environment variable or default
 API_BASE_URL = os.getenv("FASTAPI_URL", "http://localhost:8000")
+API_TOKEN = os.getenv("STREAMLIT_API_TOKEN", "eyJhbGciOiJIUzI1NiIsImtpZCI6ImFzZGFzZGFzZCIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzdHJlYW1saXRfZnJvbnRlbmQiLCJleHAiOjE4MDcyNjk3NDksImlzcyI6ImRldi1pZGVudGlmeS1BYXJvZ3lhLm9uZSIsImF1ZCI6ImRldi1BYXJvZ3lhLm9uZSJ9.FiW2xwJIDrIAv_Cfu8ATNb9iVp9kCyLHIsBF13wpJ6w")
+HEADERS = {"Authorization": f"Bearer {API_TOKEN}"} if API_TOKEN else {}
 
 st.set_page_config(
     page_title="AarogyaOne - Medical Assistant",
@@ -94,7 +96,7 @@ with st.sidebar:
     st.divider()
     st.write("### System Status")
     try:
-        health_response = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        health_response = requests.get(f"{API_BASE_URL}/health", headers=HEADERS, timeout=5)
         if health_response.status_code == 200:
             st.success("✅ Backend Connected")
         else:
@@ -179,7 +181,7 @@ elif st.session_state.current_page == "appointment":
                     "message": prompt,
                     "session_id": st.session_state.session_id
                 }
-                response = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=300)
+                response = requests.post(f"{API_BASE_URL}/chat", json=payload, headers=HEADERS, timeout=300)
                 response.raise_for_status()
                 
                 data = response.json()
@@ -268,6 +270,7 @@ elif st.session_state.current_page == "chatbot":
                             res = requests.post(
                                 f"{API_BASE_URL}/api/qa/upload/{st.session_state.abha}",
                                 files=files,
+                                headers=HEADERS,
                                 timeout=600
                             )
                             if res.status_code == 200:
@@ -287,7 +290,7 @@ elif st.session_state.current_page == "chatbot":
     # Document Status List
     if st.session_state.abha:
         try:
-            files_res = requests.get(f"{API_BASE_URL}/api/qa/files/{st.session_state.abha}")
+            files_res = requests.get(f"{API_BASE_URL}/api/qa/files/{st.session_state.abha}", headers=HEADERS)
             if files_res.status_code == 200:
                 indexed = files_res.json().get("indexed_files", [])
                 if indexed:
@@ -331,7 +334,7 @@ elif st.session_state.current_page == "chatbot":
                     "query": prompt,
                     "history": history
                 }
-                res = requests.post(f"{API_BASE_URL}/api/qa/chat/", json=payload, timeout=120)
+                res = requests.post(f"{API_BASE_URL}/api/qa/chat/", json=payload, headers=HEADERS, timeout=120)
                 if res.status_code == 200:
                     answer = res.json().get("answer", "No answer received.")
                 else:
