@@ -4,6 +4,10 @@ Simulates a full booking conversation without HTTP/JWT.
 """
 import asyncio
 import json
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 
 async def test_chat_flow():
