@@ -1,14 +1,16 @@
 """
-Medical Appointment Booking Agent — 4-Step MCP Tool Flow
+Medical Appointment Booking Agent — 5-Step MCP Tool Flow with Symptom AI
 
-Uses MCP tools in strict sequence:
-  1. get_doctors_list          → Show doctors
-  2. get_doctor_facilities     → Show facilities for selected doctor
-  3. get_doctor_availability   → Show available time slots
-  4. book_appointment          → Book the appointment
+Uses MCP tools in sequence:
+  1. get_doctors_by_symptoms   → AI symptom analysis → filtered doctors + slots
+  2. get_doctors_list          → Show all doctors (fallback)
+  3. get_doctor_facilities     → Show facilities for selected doctor
+  4. get_doctor_availability   → Show available time slots
+  5. book_appointment          → Book the appointment
 
-The agent detects user intent, manages conversation state, and calls
-MCP tools directly (in-process) for zero-overhead tool execution.
+The agent detects user symptoms, maps them to specializations, and shows
+only relevant doctors. Falls back to showing all doctors when no symptoms
+are detected.
 """
 import json
 import re
@@ -21,6 +23,12 @@ from datetime import datetime, timedelta
 import httpx
 
 from app.config.settings import settings
+from app.agent.symptom_engine import (
+    analyze_symptoms,
+    has_symptom_keywords,
+    extract_symptoms,
+    symptoms_to_specializations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +42,7 @@ from app.mcp.mcp_server import (
     get_doctor_facilities as mcp_get_doctor_facilities,
     get_doctor_availability as mcp_get_doctor_availability,
     book_appointment as mcp_book_appointment,
+    get_doctors_by_symptoms as mcp_get_doctors_by_symptoms,
 )
 
 
@@ -72,8 +81,16 @@ class SessionManager:
         return {
             "messages": [],
             "stage": "start",
-            # Stage flow: start → doctors_shown → facility_shown → slots_shown
-            #           → patient_collection → confirm → booked
+            # Stage flow:
+            #   Symptom path: start → symptom_doctors_shown → facility_shown → slots_shown
+            #                 → patient_collection → confirm → booked
+            #   Direct path:  start → doctors_shown → facility_shown → slots_shown
+            #                 → patient_collection → confirm → booked
+
+            # ── Symptom analysis data ────────────────────────────────────
+            "symptoms": [],                # Extracted symptoms
+            "matched_specializations": [], # Mapped specializations
+            "symptom_doctors_data": [],    # Filtered doctors from symptom analysis
 
             # ── MCP data (stored from tool responses) ────────────────────
             "doctors_data": [],          # Raw doctor list from MCP tool 1
@@ -273,6 +290,9 @@ class AppointmentAgent:
         if stage == "start":
             return await self._handle_start(session_id, session, user_message)
 
+        elif stage == "symptom_doctors_shown":
+            return await self._handle_symptom_doctor_selection(session_id, session, user_message)
+
         elif stage == "doctors_shown":
             return await self._handle_doctor_selection(session_id, session, user_message)
 
@@ -308,12 +328,231 @@ class AppointmentAgent:
 
         # Greetings
         if msg_low in ("hi", "hello", "hey", "namaste", "kem cho"):
-            return self._reply(sid, "Hello! 👋 How can I help you with booking an appointment?")
+            return self._reply(
+                sid,
+                "Hello! 👋 I can help you book an appointment.\n\n"
+                "**Tell me your symptoms** and I'll suggest the right doctor for you!\n"
+                "For example: _\"I have fever and headache\"_ or _\"pet dukhe che\"_\n\n"
+                "Or type **\"all doctors\"** to see the full list."
+            )
 
-        # Any booking-related intent → fetch doctors
-        response_text = "Let me fetch the available doctors for you…\n\n"
+        # ── Check for "show all doctors" intent ──────────────────────────
+        if msg_low in ("all doctors", "all", "show all", "list all", "badha doctors", "badha"):
+            return await self._show_all_doctors(sid, session)
 
-        # ── MCP Tool 1: get_doctors_list ──────────────────────────────────
+        # ── SYMPTOM DETECTION — the new AI layer ─────────────────────────
+        if has_symptom_keywords(msg):
+            return await self._handle_symptom_flow(sid, session, msg)
+
+        # ── Fallback: any other booking intent → ask for symptoms or show all
+        # Check if it looks like a booking intent
+        booking_keywords = r'\b(book|appointment|appoint|doctor|visit|checkup|consult|opd|milvu|batavo|dekhado)\b'
+        if re.search(booking_keywords, msg_low):
+            return self._reply(
+                sid,
+                "I'd love to help you book an appointment! 🏥\n\n"
+                "**What symptoms are you experiencing?**\n"
+                "Tell me your symptoms and I'll recommend the right specialist.\n\n"
+                "_Example: \"I have fever and cough\" / \"mane taav aave che\"_\n\n"
+                "Or type **\"all doctors\"** to see every available doctor."
+            )
+
+        # Generic — try symptom analysis anyway (user might have said something medical)
+        analysis = await analyze_symptoms(msg)
+        if analysis["symptoms"]:
+            return await self._handle_symptom_flow(sid, session, msg)
+
+        # Nothing recognized — prompt
+        return self._reply(
+            sid,
+            "I can help you book a doctor's appointment! 🏥\n\n"
+            "Please tell me **what symptoms you're experiencing**, "
+            "and I'll suggest the best doctor for you.\n\n"
+            "_Example: \"I have headache and fever\"_\n"
+            "_Example: \"mane pet dukhe che\"_\n\n"
+            "Or type **\"all doctors\"** to browse the full list."
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # SYMPTOM FLOW — AI-powered symptom → doctor matching
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_symptom_flow(self, sid: str, session: Dict, msg: str) -> Dict:
+        """Analyze symptoms and show filtered doctors with slots."""
+        response_text = "🔍 Analyzing your symptoms…\n\n"
+
+        # ── Step 1: Analyze symptoms ─────────────────────────────────────
+        analysis = await analyze_symptoms(msg)
+        symptoms = analysis["symptoms"]
+        specializations = analysis["specializations"]
+
+        if not symptoms:
+            # Couldn't detect symptoms — fallback to all doctors
+            response_text += "I couldn't identify specific symptoms. Let me show you all available doctors.\n\n"
+            return await self._show_all_doctors(sid, session, prefix=response_text)
+
+        # Store in session
+        session["symptoms"] = symptoms
+        session["matched_specializations"] = specializations
+
+        symptom_display = ", ".join(f"**{s}**" for s in symptoms)
+        spec_display = ", ".join(specializations[:3])  # Show top 3
+        response_text += f"📋 **Symptoms detected:** {symptom_display}\n"
+        response_text += f"🏥 **Recommended department(s):** {spec_display}\n\n"
+
+        # ── Step 2: Fetch filtered doctors via MCP Tool 5 ────────────────
+        response_text += "Finding the right doctors for you…\n\n"
+
+        raw = await mcp_get_doctors_by_symptoms(specializations=specializations)
+        data = json.loads(raw)
+
+        if not data.get("success") or not data.get("doctors"):
+            response_text += "⚠️ No matching specialists available right now.\n"
+            response_text += "Let me show you all available doctors instead.\n\n"
+            return await self._show_all_doctors(sid, session, prefix=response_text)
+
+        doctors = data["doctors"]
+        session["symptom_doctors_data"] = doctors
+        is_fallback = data.get("fallback", False)
+
+        # ── Step 3: Format doctor list with preview slots ────────────────
+        if is_fallback:
+            spec_names = ", ".join(specializations)
+            lines = [
+                f"⚠️ **Note:** We couldn't find any available specialists in **{spec_names}** at this facility right now.\n",
+                "Here are all other available doctors if you'd like to consult them instead:\n"
+            ]
+        else:
+            lines = ["Here are the recommended doctors based on your symptoms:\n"]
+
+        # Group doctors by department for clean display
+        dept_groups: Dict[str, List] = {}
+        for doc in doctors:
+            dept = doc.get("department", "General")
+            if dept not in dept_groups:
+                dept_groups[dept] = []
+            dept_groups[dept].append(doc)
+
+        for dept, dept_docs in dept_groups.items():
+            lines.append(f"\n🏥 **{dept}**")
+            for doc in dept_docs:
+                total_slots = doc.get("totalSlots", 0)
+                # Show preview of next 3 available slots
+                preview_slots = []
+                for date_grp in doc.get("dates", [])[:2]:  # First 2 dates
+                    date_str = date_grp["date"]
+                    for slot in date_grp["slots"][:2]:  # First 2 slots per date
+                        preview_slots.append(f"{slot['startTime']}")
+
+                preview_text = ", ".join(preview_slots[:3])
+                lines.append(
+                    f"  {doc['index']}. 👨‍⚕️ **{doc['name']}** "
+                    f"({total_slots} slots available)"
+                )
+                if preview_text:
+                    lines.append(f"     ⏰ Next: {preview_text} …")
+
+        lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("Enter the **doctor number** to see all available slots.")
+        lines.append("Or type **\"all doctors\"** to see the complete list.")
+
+        session["stage"] = "symptom_doctors_shown"
+        response_text += "\n".join(lines)
+        return self._reply(sid, response_text)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: symptom_doctors_shown — User selects from symptom-filtered doctors
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_symptom_doctor_selection(self, sid: str, session: Dict, msg: str) -> Dict:
+        """Handle doctor selection from the symptom-filtered list."""
+        msg_low = msg.strip().lower()
+
+        # Allow switching to "all doctors" view
+        if msg_low in ("all doctors", "all", "show all", "badha"):
+            session["stage"] = "start"
+            return await self._show_all_doctors(sid, session)
+
+        doctors = session.get("symptom_doctors_data", [])
+
+        # Try to parse a number selection
+        digit_match = re.search(r'^\s*(\d+)\s*$', msg)
+        if digit_match:
+            index = int(digit_match.group(1))
+            selected = next((d for d in doctors if d["index"] == index), None)
+        else:
+            # Try to match by name
+            selected = next(
+                (d for d in doctors if msg_low in d.get("name", "").lower()),
+                None
+            )
+
+        if not selected:
+            return self._reply(
+                sid,
+                f"Please enter a valid doctor number from the list (1-{len(doctors)}), "
+                f"or type **\"all doctors\"** to see everyone."
+            )
+
+        # Store selected doctor
+        session["selected_doctor"] = {
+            "healthProfessionalId": selected["healthProfessionalId"],
+            "name": selected["name"],
+            "index": selected["index"],
+        }
+        logger.info(f"[{sid}] Symptom-flow doctor selected: {selected['name']}")
+
+        # ── Now fetch facilities for this doctor (MCP Tool 2) ────────────
+        response_text = f"Great choice! Let me check available locations for **{selected['name']}**…\n\n"
+
+        raw = await mcp_get_doctor_facilities(
+            health_professional_id=selected["healthProfessionalId"]
+        )
+        data = json.loads(raw)
+
+        if not data.get("success") or not data.get("facilities"):
+            return self._reply(
+                sid,
+                f"⚠️ No facilities found for {selected['name']}. Please try another doctor."
+            )
+
+        facilities = data["facilities"]
+        session["facilities_data"] = facilities
+
+        if len(facilities) == 1:
+            # Auto-select single facility → fetch availability
+            fac = facilities[0]
+            session["selected_facility"] = {
+                "facilityId": fac["facilityId"],
+                "name": fac["name"],
+                "index": 1,
+            }
+            logger.info(f"[{sid}] Auto-selected facility: {fac['name']}")
+
+            response_text += f"**{selected['name']}** is available at **{fac['name']}**.\n"
+            response_text += "Let me check the available slots…\n\n"
+
+            return await self._fetch_and_show_slots(sid, session, response_text)
+        else:
+            # Multiple facilities → ask user to choose
+            lines = [f"**{selected['name']}** is available at multiple locations:\n"]
+            for fac in facilities:
+                addr = fac.get("address", "")
+                lines.append(f"  {fac['index']}. {fac['name']}" + (f" — {addr}" if addr else ""))
+            lines.append("\nWhich facility would you like to visit? (Enter the number)")
+
+            session["stage"] = "facility_shown"
+            response_text += "\n".join(lines)
+            return self._reply(sid, response_text)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # HELPER: Show all doctors (original flow, no symptom filtering)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _show_all_doctors(self, sid: str, session: Dict, prefix: str = "") -> Dict:
+        """Fetch and show all doctors (original non-symptom flow)."""
+        response_text = prefix + "Fetching all available doctors…\n\n"
+
         raw = await mcp_get_doctors_list()
         data = json.loads(raw)
 
@@ -323,8 +562,7 @@ class AppointmentAgent:
         doctors = data["doctors"]
         session["doctors_data"] = doctors
 
-        # Build numbered list of doctor names ONLY
-        lines = ["Here are our available doctors:\n"]
+        lines = ["Here are all available doctors:\n"]
         for doc in doctors:
             lines.append(f"  {doc['index']}. {doc['name']}")
 

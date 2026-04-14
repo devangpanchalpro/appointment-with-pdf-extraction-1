@@ -129,6 +129,8 @@ class CollectedInfo(BaseModel):
 
     # ── Appointment context ───────────────────────────────────────────────────
     symptoms: Optional[List[str]] = None
+    matched_specializations: Optional[List[str]] = None
+    symptom_summary: Optional[str] = None
 
     # Doctor selection (set when user picks doctor+slot)
     health_professional_id:  Optional[str] = None

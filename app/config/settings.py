@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Timeout for Ollama LLM requests (seconds)
     OLLAMA_TIMEOUT: int = 300
 
+    # Gemini AI (for symptom analysis fallback)
+    GEMINI_API_KEY: Optional[str] = None
+
     # JWT / JWE Authentication
     JWT_AUDIENCE: str = "dev-Aarogya.one"
     JWT_ISSUER: str = "dev-identify-Aarogya.one"
@@ -64,11 +67,7 @@ class Settings(BaseSettings):
             return self.EXTERNAL_API_KEY_PROD
         return self.EXTERNAL_API_KEY_DEV
 
-    # External API Endpoint paths (Aarogya HMIS API)
-    DOCTORS_AVAILABILITY_ENDPOINT: str = "/doctors/availability"
-    BOOK_APPOINTMENT_ENDPOINT: str = "/appointment/schedule"
-
-    # Default facility ID
+    # Default facility ID (required — Aarogya API needs this for doctor queries)
     DEFAULT_FACILITY_ID: str = "crmpo1ob0004991hpkvg"  # Tara Hospital default
 
     # FastAPI

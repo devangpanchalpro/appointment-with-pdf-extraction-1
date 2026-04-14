@@ -239,6 +239,58 @@ async def api_book_appointment(
     return json.loads(result)
 
 
+class DoctorsBySymptoms(BaseModel):
+    symptoms: list[str]
+    facility_id: Optional[str] = None
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+
+
+@app.post("/api/doctors-by-symptoms", tags=["Booking Flow"])
+async def api_get_doctors_by_symptoms(
+    req: DoctorsBySymptoms,
+    token: dict = Depends(verify_jwt),
+):
+    """
+    AI-Powered Symptom → Doctor Matching
+
+    Analyzes the given symptoms, maps them to medical specializations,
+    and returns filtered doctors with available slots.
+    """
+    from app.agent.symptom_engine import analyze_symptoms, symptoms_to_specializations
+    from app.mcp.mcp_server import get_doctors_by_symptoms
+
+    # If raw symptom strings are passed, map to specializations
+    specializations = symptoms_to_specializations(req.symptoms)
+    if not specializations:
+        # Try treating the symptoms list items as specializations directly
+        specializations = req.symptoms
+
+    result = await get_doctors_by_symptoms(
+        specializations=specializations,
+        facility_id=req.facility_id,
+        from_date=req.from_date,
+        to_date=req.to_date,
+    )
+    import json
+    return json.loads(result)
+
+
+@app.post("/api/analyze-symptoms", tags=["Booking Flow"])
+async def api_analyze_symptoms(
+    message: str = Body(..., embed=True),
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Analyze a natural language message and extract symptoms + specializations.
+
+    Returns detected symptoms and recommended medical departments.
+    """
+    from app.agent.symptom_engine import analyze_symptoms
+    result = await analyze_symptoms(message)
+    return result
+
+
 @app.post("/chat", response_model=ChatResponse, tags=["Agent"])
 async def chat(req: ChatRequest, token: dict = Depends(verify_jwt)):
     """

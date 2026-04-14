@@ -356,6 +356,129 @@ async def book_appointment(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Tool 5: get_doctors_by_symptoms (AI-powered symptom → doctor matching)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def get_doctors_by_symptoms(
+    specializations: List[str],
+    facility_id: Optional[str] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> str:
+    """
+    Fetch doctors filtered by medical specializations that match the user's symptoms.
+
+    This is a composite tool that:
+      1. Fetches all doctor availability for the facility
+      2. Filters by departments matching the given specializations
+      3. Returns filtered doctors with their available slots
+
+    Args:
+        specializations: List of target medical specializations (e.g., ["General Medicine", "Neurology"])
+        facility_id: Facility ID (defaults to DEFAULT_FACILITY_ID)
+        from_date: Start date (YYYY-MM-DD, defaults to today)
+        to_date: End date (YYYY-MM-DD, defaults to today+3)
+
+    Returns:
+        JSON with filtered doctors grouped by department, with available slots
+    """
+    from app.agent.symptom_engine import filter_doctors_by_specialization
+
+    fac_id = facility_id or settings.DEFAULT_FACILITY_ID
+    if not from_date:
+        from_date = datetime.now().strftime("%Y-%m-%d")
+    if not to_date:
+        to_date = (datetime.now() + timedelta(days=3)).strftime("%Y-%m-%d")
+
+    logger.info(
+        f"[MCP] get_doctors_by_symptoms | specializations={specializations} "
+        f"facility={fac_id} from={from_date} to={to_date}"
+    )
+
+    try:
+        # Step 1: Fetch ALL doctors' availability for this facility
+        availability = await aarogya_api.get_doctors_availability(
+            facility_id=fac_id,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+        if not availability:
+            return json.dumps({
+                "success": False,
+                "doctors": [],
+                "message": "No doctors available at this facility currently.",
+            })
+
+        # Step 2: Filter by specializations
+        filtered = filter_doctors_by_specialization(availability, specializations)
+
+        if not filtered:
+            # No matching specialists found — return all doctors as fallback
+            logger.info("[MCP] No specialists matched, returning all doctors")
+            filtered = availability
+            fallback = True
+        else:
+            fallback = False
+
+        # Step 3: Format output — group by doctor with embedded slots
+        doctors_map = {}  # healthProfessionalId → doctor info
+        for entry in filtered:
+            hp_id = entry.get("healthProfessionalId", "")
+            hp_name = entry.get("healthProfessionalName", "")
+            dept = entry.get("department", "")
+            date_str = entry.get("appointmentDate", "")
+
+            if hp_id not in doctors_map:
+                doctors_map[hp_id] = {
+                    "healthProfessionalId": hp_id,
+                    "name": hp_name,
+                    "department": dept,
+                    "dates": [],
+                }
+
+            # Extract available slots for this date
+            date_slots = []
+            for sched in entry.get("schedule", []):
+                session_name = sched.get("session", "")
+                for slot in sched.get("slots", []):
+                    if _slot_is_available(slot.get("isAvailable")):
+                        date_slots.append({
+                            "startTime": slot.get("from", ""),
+                            "endTime": slot.get("to", ""),
+                            "session": session_name,
+                        })
+
+            if date_slots:
+                doctors_map[hp_id]["dates"].append({
+                    "date": date_str,
+                    "slots": date_slots,
+                })
+
+        # Convert to sorted list
+        doctors_list = []
+        for i, (hp_id, doc) in enumerate(doctors_map.items(), 1):
+            total_slots = sum(len(d["slots"]) for d in doc["dates"])
+            if total_slots > 0:
+                doc["index"] = i
+                doc["totalSlots"] = total_slots
+                doctors_list.append(doc)
+
+        return json.dumps({
+            "success": True,
+            "count": len(doctors_list),
+            "specializations": specializations,
+            "fallback": fallback,
+            "doctors": doctors_list,
+        })
+
+    except Exception as e:
+        logger.error(f"[MCP] get_doctors_by_symptoms error: {e}", exc_info=True)
+        return json.dumps({"success": False, "error": str(e), "doctors": []})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 

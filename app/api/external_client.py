@@ -50,7 +50,7 @@ class AarogyaAPIClient:
         }
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                url = f"{self.base_url}/doctors"
+                url = f"{self.base_url}{settings.DOCTORS_LIST_ENDPOINT}"
                 logger.info(f"API GET: {url} | params: {params}")
                 response = await client.get(url, headers=self.headers, params=params)
                 response.raise_for_status()
@@ -83,7 +83,9 @@ class AarogyaAPIClient:
         """
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                url = f"{self.base_url}/doctors/{health_professional_id}/facilities"
+                # Use DOCTOR_FACILITIES_ENDPOINT from settings and append dynamic parts
+                base_path = settings.DOCTOR_FACILITIES_ENDPOINT
+                url = f"{self.base_url}{base_path}/{health_professional_id}/facilities"
                 logger.info(f"API GET: {url}")
                 response = await client.get(url, headers=self.headers)
                 response.raise_for_status()
