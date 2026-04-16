@@ -110,22 +110,6 @@ async def health(token: dict = Depends(verify_jwt)):
     }
 
 
-@app.get("/doctors", tags=["Doctors"])
-async def get_doctors(
-    facility_id: Optional[str] = None,
-    refresh: bool = False,
-    token: dict = Depends(verify_jwt)
-):
-    """
-    GET /doctors — Legacy endpoint (cached availability data).
-    """
-    doctors = await doctors_cache.get_doctors(facility_id, force_refresh=refresh)
-    return {
-        "count": len(doctors),
-        "doctors": doctors,
-    }
-
-
 # ── MCP-aligned Booking API ───────────────────────────────────────────────────
 
 from app.api.external_client import aarogya_api as api_client
