@@ -24,15 +24,15 @@ services:
     env_file:
       - .env
     environment:
-      - ENVIRONMENT=dev
+      - ENVIRONMENT=prod
       - OLLAMA_BASE_URL=http://ollama:11434
       - LLM_MODEL=llama3.2:latest
-      - EXTERNAL_API_BASE_URL_DEV=https://dev-hmis-api.aarogya.one/api/v1
+      - EXTERNAL_API_BASE_URL_DEV=https://hmis-api.aarogya.one/api/v1
       - EXTERNAL_API_KEY_DEV=${EXTERNAL_API_KEY_DEV}
-      - EXTERNAL_API_BASE_URL_PROD=https://beta-hmis.aarogya.one/api/v1
-      - EXTERNAL_API_KEY_PROD=${EXTERNAL_API_KEY_PROD:-}
+      - EXTERNAL_API_BASE_URL_PROD=https://hmis-api.aarogya.one/api/v1
+      - EXTERNAL_API_KEY_PROD=${EXTERNAL_API_KEY_PROD}
       - EXTERNAL_API_TIMEOUT=30
-      - DEFAULT_FACILITY_ID=crmpo1ob0004991hpkvg
+
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - PYTHONUNBUFFERED=1
     volumes:
@@ -67,7 +67,7 @@ services:
 #       - EXTERNAL_API_BASE_URL_PROD=https://beta-hmis.aarogya.one/api/v1
 #       - EXTERNAL_API_KEY_PROD=${EXTERNAL_API_KEY_PROD:-}
 #       - EXTERNAL_API_TIMEOUT=30
-#       - DEFAULT_FACILITY_ID=crmpo1ob0004991hpkvg
+
 #       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
 #       - FASTAPI_URL=http://fastapi:8000
 #       - PYTHONUNBUFFERED=1

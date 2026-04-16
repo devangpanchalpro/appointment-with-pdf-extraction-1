@@ -126,9 +126,38 @@ async def get_doctors(
     }
 
 
-# ── MCP-aligned 4-Step Booking API ───────────────────────────────────────────
+# ── MCP-aligned Booking API ───────────────────────────────────────────────────
 
 from app.api.external_client import aarogya_api as api_client
+
+
+@app.get("/api/facilities", tags=["Booking Flow"])
+async def api_get_facilities_list(
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Step 0: GET /api/facilities
+    Fetches all available facilities (hospitals/clinics).
+    """
+    from app.mcp.mcp_server import get_facilities_list
+    result = await get_facilities_list()
+    import json
+    return json.loads(result)
+
+
+@app.get("/api/search-doctor", tags=["Booking Flow"])
+async def api_search_doctor_by_name(
+    name: str,
+    token: dict = Depends(verify_jwt),
+):
+    """
+    Search for a doctor by name across all facilities.
+    Returns doctor info and list of facilities where they work.
+    """
+    from app.mcp.mcp_server import search_doctor_by_name
+    result = await search_doctor_by_name(doctor_name=name)
+    import json
+    return json.loads(result)
 
 
 @app.get("/api/doctors-list", tags=["Booking Flow"])

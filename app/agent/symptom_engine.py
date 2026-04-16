@@ -430,8 +430,8 @@ def filter_doctors_by_specialization(
     specializations: List[str],
 ) -> List[Dict]:
     """
-    Filter doctor availability data by matching department names
-    against the given specializations.
+    Filter doctor availability data by matching department, specialization,
+    and sub-specialization names against the given specializations.
 
     Args:
         availability_data: Raw availability response from Aarogya API
@@ -439,7 +439,7 @@ def filter_doctors_by_specialization(
         specializations: List of target specializations to match
 
     Returns:
-        Filtered list of doctor availability entries with matching departments
+        Filtered list of doctor availability entries with matching departments/specializations
     """
     if not specializations or not availability_data:
         return availability_data  # Return all if no filter
@@ -449,28 +449,47 @@ def filter_doctors_by_specialization(
     filtered = []
     for entry in availability_data:
         dept = entry.get("department", "").lower()
+        sub_spec = entry.get("subSpecialization", "").lower()
+        spec_field = entry.get("specialization", "").lower()
 
-        # Exact department match
-        if dept in spec_lower:
-            filtered.append(entry)
-            continue
+        # Combine all searchable fields
+        searchable_fields = [dept, sub_spec, spec_field]
 
-        # Fuzzy: check if any specialization keyword is IN the department name
-        # e.g., "General Medicine" matches "Department of General Medicine"
-        for spec in spec_lower:
-            if spec in dept or dept in spec:
-                filtered.append(entry)
+        matched = False
+
+        for field in searchable_fields:
+            if not field:
+                continue
+
+            # Exact match
+            if field in spec_lower:
+                matched = True
                 break
 
-        # Also check partial word match
-        # e.g., "cardiology" matches "Interventional Cardiology"
-        if entry not in filtered:
-            dept_words = set(dept.split())
+            # Fuzzy: check if any specialization keyword is IN the field name
+            # e.g., "General Medicine" matches "Department of General Medicine"
+            for spec in spec_lower:
+                if spec in field or field in spec:
+                    matched = True
+                    break
+
+            if matched:
+                break
+
+            # Partial word match
+            # e.g., "cardiology" matches "Interventional Cardiology"
+            field_words = set(field.split())
             for spec in spec_lower:
                 spec_words = set(spec.split())
-                if spec_words & dept_words:  # Any common word
-                    filtered.append(entry)
+                if spec_words & field_words:  # Any common word
+                    matched = True
                     break
+
+            if matched:
+                break
+
+        if matched:
+            filtered.append(entry)
 
     logger.info(
         f"[SymptomEngine] Filtered {len(availability_data)} doctors → "

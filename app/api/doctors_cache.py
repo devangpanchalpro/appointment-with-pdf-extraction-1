@@ -29,7 +29,10 @@ class DoctorsCache:
         Get doctors with availability.
         Uses cache if recent, otherwise fetches from API.
         """
-        fac_id = facility_id or settings.DEFAULT_FACILITY_ID
+        fac_id = facility_id
+        if not fac_id:
+            logger.warning("No facility_id provided to DoctorsCache.get_doctors()")
+            return []
         
         # Check if cache valid
         if not force_refresh and self._doctors and self._last_fetched:

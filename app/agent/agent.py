@@ -1,16 +1,16 @@
 """
-Medical Appointment Booking Agent — 5-Step MCP Tool Flow with Symptom AI
+Medical Appointment Booking Agent — Facility-First Flow
 
-Uses MCP tools in sequence:
-  1. get_doctors_by_symptoms   → AI symptom analysis → filtered doctors + slots
-  2. get_doctors_list          → Show all doctors (fallback)
-  3. get_doctor_facilities     → Show facilities for selected doctor
-  4. get_doctor_availability   → Show available time slots
-  5. book_appointment          → Book the appointment
+Three booking scenarios:
+  1. Generic appointment → Show facilities → Select facility → Show doctors → Select doctor → Slots → Book
+  2. Doctor name search  → Find doctor → Show facilities (if multi) → Slots → Book
+  3. Symptom-based       → Analyze symptoms → Search ALL facilities → Show matching doctors+facilities → Slots → Book
 
-The agent detects user symptoms, maps them to specializations, and shows
-only relevant doctors. Falls back to showing all doctors when no symptoms
-are detected.
+Stage flow:
+  Scenario 1: start → facilities_shown → facility_doctors_shown → slots_shown → patient_collection → confirm → booked
+  Scenario 2: start → doctor_facilities_shown → slots_shown → patient_collection → confirm → booked
+              start → slots_shown → patient_collection → confirm → booked  (if single facility)
+  Scenario 3: start → symptom_doctors_shown → slots_shown → patient_collection → confirm → booked
 """
 import json
 import re
@@ -23,12 +23,7 @@ from datetime import datetime, timedelta
 import httpx
 
 from app.config.settings import settings
-from app.agent.symptom_engine import (
-    analyze_symptoms,
-    has_symptom_keywords,
-    extract_symptoms,
-    symptoms_to_specializations,
-)
+
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +37,9 @@ from app.mcp.mcp_server import (
     get_doctor_facilities as mcp_get_doctor_facilities,
     get_doctor_availability as mcp_get_doctor_availability,
     book_appointment as mcp_book_appointment,
-    get_doctors_by_symptoms as mcp_get_doctors_by_symptoms,
+
+    get_facilities_list as mcp_get_facilities_list,
+    search_doctor_by_name as mcp_search_doctor_by_name,
 )
 
 
@@ -82,15 +79,20 @@ class SessionManager:
             "messages": [],
             "stage": "start",
             # Stage flow:
-            #   Symptom path: start → symptom_doctors_shown → facility_shown → slots_shown
-            #                 → patient_collection → confirm → booked
-            #   Direct path:  start → doctors_shown → facility_shown → slots_shown
-            #                 → patient_collection → confirm → booked
+            #   Facility path:  start → facilities_shown → facility_doctors_shown → slots_shown
+            #                   → patient_collection → confirm → booked
+            #   Doctor search:  start → doctor_facilities_shown → slots_shown
+            #                   → patient_collection → confirm → booked
 
-            # ── Symptom analysis data ────────────────────────────────────
-            "symptoms": [],                # Extracted symptoms
-            "matched_specializations": [], # Mapped specializations
-            "symptom_doctors_data": [],    # Filtered doctors from symptom analysis
+
+            # ── Facility data ────────────────────────────────────────────
+            "all_facilities_data": [],     # From GET /facilities
+            "facility_doctors_data": [],   # Doctors at a selected facility
+
+            # ── Doctor search data ───────────────────────────────────────
+            "doctor_search_results": None, # {doctor, facilities} from name search
+
+
 
             # ── MCP data (stored from tool responses) ────────────────────
             "doctors_data": [],          # Raw doctor list from MCP tool 1
@@ -116,6 +118,7 @@ class SessionManager:
             },
 
             "booked": False,
+            "previous_patients": [],
         }
 
     def add_message(self, sid: str, role: str, content: str):
@@ -267,13 +270,54 @@ def _missing_patient_fields(patient: Dict) -> List[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# The Agent — 4-Step MCP Flow
+# Doctor name extraction from user message
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _extract_doctor_name(msg: str) -> Optional[str]:
+    """
+    Try to extract a doctor name from the user's message.
+    Returns the doctor name string if found, None otherwise.
+    """
+    msg_low = msg.strip().lower()
+
+    # Pattern: "Dr. FirstName LastName" / "doctor FirstName LastName"
+    patterns = [
+        r'(?:dr\.?\s*|doctor\s+|doc\s+)([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})',
+        r'(?:appointment\s+(?:with|for|of)\s+)([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})',
+        r'(?:book\s+(?:with|for)\s+)([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})',
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, msg, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip()
+            # Filter out non-name words
+            name_parts = [p for p in name.split() if p.lower() not in FORBIDDEN_NAMES and len(p) > 1]
+            if name_parts:
+                # Check there's at least one capitalized/real name word
+                candidate = " ".join(name_parts)
+                # Filter out common intent words
+                skip_words = {"appointment", "book", "booking", "chahiye", "karvu", "karo",
+                              "available", "slot", "time", "schedule", "today", "tomorrow",
+                              "ki", "ka", "ke", "hai", "hee", "che", "no", "na"}
+                if not all(w.lower() in skip_words for w in name_parts):
+                    return candidate
+
+    return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# The Agent — Facility-First Flow
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class AppointmentAgent:
     """
-    Agentic booking assistant that calls MCP tools in sequence:
-      get_doctors_list → get_doctor_facilities → get_doctor_availability → book_appointment
+    Agentic booking assistant with facility-first flow.
+
+    Three paths:
+      1. Generic appointment → facilities → doctors → slots → book
+      2. Doctor name search  → find doctor → facilities → slots → book
+      3. Symptom-based       → analyze → search all facilities → doctors+facility → slots → book
     """
 
     # ── Main chat handler ─────────────────────────────────────────────────────
@@ -290,14 +334,18 @@ class AppointmentAgent:
         if stage == "start":
             return await self._handle_start(session_id, session, user_message)
 
-        elif stage == "symptom_doctors_shown":
-            return await self._handle_symptom_doctor_selection(session_id, session, user_message)
+        elif stage == "facilities_shown":
+            return await self._handle_facility_selection_from_list(session_id, session, user_message)
 
-        elif stage == "doctors_shown":
-            return await self._handle_doctor_selection(session_id, session, user_message)
+        elif stage == "facility_doctors_shown":
+            return await self._handle_facility_doctor_selection(session_id, session, user_message)
 
-        elif stage == "facility_shown":
-            return await self._handle_facility_selection(session_id, session, user_message)
+
+        elif stage == "doctor_search_results_shown":
+            return await self._handle_doctor_search_selection(session_id, session, user_message)
+
+        elif stage == "doctor_facilities_shown":
+            return await self._handle_doctor_facility_selection(session_id, session, user_message)
 
         elif stage == "slots_shown":
             return await self._handle_slot_selection(session_id, session, user_message)
@@ -308,14 +356,20 @@ class AppointmentAgent:
         elif stage == "confirm":
             return await self._handle_confirmation(session_id, session, user_message)
 
+        elif stage == "booking_failed":
+            return await self._handle_booking_failed(session_id, session, user_message)
+
+        elif stage == "booking_failed_duplicate":
+            return await self._handle_booking_failed_duplicate(session_id, session, user_message)
+
         elif stage == "booked":
-            return self._reply(session_id, "Your appointment is already booked! Type 'new' to book another one.")
+            return await self._handle_booked(session_id, session, user_message)
 
         else:
             return await self._handle_start(session_id, session, user_message)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STAGE: start — Detect intent, fetch doctors via MCP Tool 1
+    # STAGE: start — Detect intent and route
     # ══════════════════════════════════════════════════════════════════════════
 
     async def _handle_start(self, sid: str, session: Dict, msg: str) -> Dict:
@@ -327,266 +381,172 @@ class AppointmentAgent:
             return self._reply(sid, "Session reset! How can I help you book an appointment?")
 
         # Greetings
-        if msg_low in ("hi", "hello", "hey", "namaste", "kem cho"):
+        greetings = {"hi", "hello", "hey", "namaste", "kem cho", "hii", "hiii",
+                     "hyy", "hy", "helo", "hlo", "namaskar", "good morning",
+                     "good afternoon", "good evening"}
+        if msg_low.strip("!") in greetings or msg_low in greetings:
             return self._reply(
                 sid,
-                "Hello! 👋 I can help you book an appointment.\n\n"
-                "**Tell me your symptoms** and I'll suggest the right doctor for you!\n"
-                "For example: _\"I have fever and headache\"_ or _\"pet dukhe che\"_\n\n"
-                "Or type **\"all doctors\"** to see the full list."
+                "Hello! I can help you with booking an appointment.\n\n"
+                "How can I help you today?\n\n"
+                "You can:\n"
+                "1. **Search by doctor name** - _\"Dr. Dhruv Barot ki appointment\"_\n"
+                "2. **Browse hospitals** - type **\"appointment\"** or **\"book\"**\n"
             )
+        # ── Check for doctor name in message ─────────────────────────────
+        doctor_name = _extract_doctor_name(msg)
+        if doctor_name:
+            return await self._handle_doctor_name_search(sid, session, doctor_name)
 
-        # ── Check for "show all doctors" intent ──────────────────────────
-        if msg_low in ("all doctors", "all", "show all", "list all", "badha doctors", "badha"):
-            return await self._show_all_doctors(sid, session)
-
-        # ── SYMPTOM DETECTION — the new AI layer ─────────────────────────
-        if has_symptom_keywords(msg):
-            return await self._handle_symptom_flow(sid, session, msg)
-
-        # ── Fallback: any other booking intent → ask for symptoms or show all
-        # Check if it looks like a booking intent
-        booking_keywords = r'\b(book|appointment|appoint|doctor|visit|checkup|consult|opd|milvu|batavo|dekhado)\b'
+        # ── Generic appointment intent → show facilities ─────────────────
+        booking_keywords = r'\b(book|appointment|appoint|doctor|visit|checkup|consult|opd|milvu|batavo|dekhado|chahiye|karvu|hospital|all doctors|all|show all|list all|badha doctors|badha)\b'
         if re.search(booking_keywords, msg_low):
-            return self._reply(
-                sid,
-                "I'd love to help you book an appointment! 🏥\n\n"
-                "**What symptoms are you experiencing?**\n"
-                "Tell me your symptoms and I'll recommend the right specialist.\n\n"
-                "_Example: \"I have fever and cough\" / \"mane taav aave che\"_\n\n"
-                "Or type **\"all doctors\"** to see every available doctor."
-            )
-
-        # Generic — try symptom analysis anyway (user might have said something medical)
-        analysis = await analyze_symptoms(msg)
-        if analysis["symptoms"]:
-            return await self._handle_symptom_flow(sid, session, msg)
+            return await self._show_facilities(sid, session)
 
         # Nothing recognized — prompt
         return self._reply(
             sid,
             "I can help you book a doctor's appointment! 🏥\n\n"
-            "Please tell me **what symptoms you're experiencing**, "
-            "and I'll suggest the best doctor for you.\n\n"
-            "_Example: \"I have headache and fever\"_\n"
-            "_Example: \"mane pet dukhe che\"_\n\n"
-            "Or type **\"all doctors\"** to browse the full list."
+            "You can:\n"
+            "1️⃣ **Search by doctor name** — _\"Dr. Dhruv Barot\"_\n"
+            "2️⃣ **Browse hospitals** — type **\"appointment\"** or **\"book\"**\n"
         )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # SYMPTOM FLOW — AI-powered symptom → doctor matching
+    # SCENARIO 1: Generic appointment → Show facilities
     # ══════════════════════════════════════════════════════════════════════════
 
-    async def _handle_symptom_flow(self, sid: str, session: Dict, msg: str) -> Dict:
-        """Analyze symptoms and show filtered doctors with slots."""
-        response_text = "🔍 Analyzing your symptoms…\n\n"
+    async def _show_facilities(self, sid: str, session: Dict, prefix: str = "") -> Dict:
+        """Fetch and show all facilities (hospitals)."""
+        response_text = prefix + "Fetching available hospitals…\n\n"
 
-        # ── Step 1: Analyze symptoms ─────────────────────────────────────
-        analysis = await analyze_symptoms(msg)
-        symptoms = analysis["symptoms"]
-        specializations = analysis["specializations"]
-
-        if not symptoms:
-            # Couldn't detect symptoms — fallback to all doctors
-            response_text += "I couldn't identify specific symptoms. Let me show you all available doctors.\n\n"
-            return await self._show_all_doctors(sid, session, prefix=response_text)
-
-        # Store in session
-        session["symptoms"] = symptoms
-        session["matched_specializations"] = specializations
-
-        symptom_display = ", ".join(f"**{s}**" for s in symptoms)
-        spec_display = ", ".join(specializations[:3])  # Show top 3
-        response_text += f"📋 **Symptoms detected:** {symptom_display}\n"
-        response_text += f"🏥 **Recommended department(s):** {spec_display}\n\n"
-
-        # ── Step 2: Fetch filtered doctors via MCP Tool 5 ────────────────
-        response_text += "Finding the right doctors for you…\n\n"
-
-        raw = await mcp_get_doctors_by_symptoms(specializations=specializations)
+        raw = await mcp_get_facilities_list()
         data = json.loads(raw)
 
-        if not data.get("success") or not data.get("doctors"):
-            response_text += "⚠️ No matching specialists available right now.\n"
-            response_text += "Let me show you all available doctors instead.\n\n"
-            return await self._show_all_doctors(sid, session, prefix=response_text)
+        if not data.get("success") or not data.get("facilities"):
+            return self._reply(sid, "⚠️ No hospitals are available at the moment. Please try again later.")
 
-        doctors = data["doctors"]
-        session["symptom_doctors_data"] = doctors
-        is_fallback = data.get("fallback", False)
+        facilities = data["facilities"]
+        session["all_facilities_data"] = facilities
 
-        # ── Step 3: Format doctor list with preview slots ────────────────
-        if is_fallback:
-            spec_names = ", ".join(specializations)
-            lines = [
-                f"⚠️ **Note:** We couldn't find any available specialists in **{spec_names}** at this facility right now.\n",
-                "Here are all other available doctors if you'd like to consult them instead:\n"
-            ]
-        else:
-            lines = ["Here are the recommended doctors based on your symptoms:\n"]
-
-        # Group doctors by department for clean display
-        dept_groups: Dict[str, List] = {}
-        for doc in doctors:
-            dept = doc.get("department", "General")
-            if dept not in dept_groups:
-                dept_groups[dept] = []
-            dept_groups[dept].append(doc)
-
-        for dept, dept_docs in dept_groups.items():
-            lines.append(f"\n🏥 **{dept}**")
-            for doc in dept_docs:
-                total_slots = doc.get("totalSlots", 0)
-                # Show preview of next 3 available slots
-                preview_slots = []
-                for date_grp in doc.get("dates", [])[:2]:  # First 2 dates
-                    date_str = date_grp["date"]
-                    for slot in date_grp["slots"][:2]:  # First 2 slots per date
-                        preview_slots.append(f"{slot['startTime']}")
-
-                preview_text = ", ".join(preview_slots[:3])
-                lines.append(
-                    f"  {doc['index']}. 👨‍⚕️ **{doc['name']}** "
-                    f"({total_slots} slots available)"
-                )
-                if preview_text:
-                    lines.append(f"     ⏰ Next: {preview_text} …")
+        lines = ["🏥 **Available Hospitals / Facilities:**\n"]
+        for fac in facilities:
+            addr = fac.get("address", "")
+            specs = ", ".join(fac.get("specializations", []))
+            line = f"  {fac['index']}. **{fac['name']}**"
+            if addr:
+                line += f"\n     📍 {addr}"
+            if specs and specs != "string":
+                line += f"\n     🔬 {specs}"
+            lines.append(line)
 
         lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append("Enter the **doctor number** to see all available slots.")
-        lines.append("Or type **\"all doctors\"** to see the complete list.")
+        lines.append("Which hospital would you like to visit? (Enter the number)")
 
-        session["stage"] = "symptom_doctors_shown"
+        session["stage"] = "facilities_shown"
         response_text += "\n".join(lines)
         return self._reply(sid, response_text)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STAGE: symptom_doctors_shown — User selects from symptom-filtered doctors
+    # STAGE: facilities_shown — User selects a facility → show doctors
     # ══════════════════════════════════════════════════════════════════════════
 
-    async def _handle_symptom_doctor_selection(self, sid: str, session: Dict, msg: str) -> Dict:
-        """Handle doctor selection from the symptom-filtered list."""
+    async def _handle_facility_selection_from_list(self, sid: str, session: Dict, msg: str) -> Dict:
+        """User selected a facility from the list. Show doctors at that facility."""
+        facilities = session.get("all_facilities_data", [])
         msg_low = msg.strip().lower()
 
-        # Allow switching to "all doctors" view
-        if msg_low in ("all doctors", "all", "show all", "badha"):
-            session["stage"] = "start"
-            return await self._show_all_doctors(sid, session)
+        # ── Handle yes/no responses (when bot asked "try another hospital?") ──
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay)\b', msg_low):
+            return await self._show_facilities(sid, session, "No problem! Let me show you the hospitals again.\n\n")
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(
+                sid,
+                "No worries! Sorry we couldn't find what you were looking for. "
+                "Feel free to come back anytime. Have a great day! 🙏"
+            )
 
-        doctors = session.get("symptom_doctors_data", [])
-
-        # Try to parse a number selection
+        # Try to parse number selection
         digit_match = re.search(r'^\s*(\d+)\s*$', msg)
         if digit_match:
             index = int(digit_match.group(1))
-            selected = next((d for d in doctors if d["index"] == index), None)
+            selected = next((f for f in facilities if f["index"] == index), None)
         else:
             # Try to match by name
             selected = next(
-                (d for d in doctors if msg_low in d.get("name", "").lower()),
+                (f for f in facilities if msg_low in f.get("name", "").lower()),
                 None
             )
 
         if not selected:
             return self._reply(
                 sid,
-                f"Please enter a valid doctor number from the list (1-{len(doctors)}), "
-                f"or type **\"all doctors\"** to see everyone."
+                f"Please enter a valid number between 1 and {len(facilities)}, "
+                f"or type **yes** to see the list again."
             )
 
-        # Store selected doctor
-        session["selected_doctor"] = {
-            "healthProfessionalId": selected["healthProfessionalId"],
+        session["selected_facility"] = {
+            "facilityId": selected["facilityId"],
             "name": selected["name"],
             "index": selected["index"],
         }
-        logger.info(f"[{sid}] Symptom-flow doctor selected: {selected['name']}")
+        logger.info(f"[{sid}] Facility selected: {selected['name']}")
 
-        # ── Now fetch facilities for this doctor (MCP Tool 2) ────────────
-        response_text = f"Great choice! Let me check available locations for **{selected['name']}**…\n\n"
+        # Fetch doctors at this facility
+        response_text = f"Fetching doctors at **{selected['name']}**…\n\n"
 
-        raw = await mcp_get_doctor_facilities(
-            health_professional_id=selected["healthProfessionalId"]
-        )
-        data = json.loads(raw)
-
-        if not data.get("success") or not data.get("facilities"):
-            return self._reply(
-                sid,
-                f"⚠️ No facilities found for {selected['name']}. Please try another doctor."
-            )
-
-        facilities = data["facilities"]
-        session["facilities_data"] = facilities
-
-        if len(facilities) == 1:
-            # Auto-select single facility → fetch availability
-            fac = facilities[0]
-            session["selected_facility"] = {
-                "facilityId": fac["facilityId"],
-                "name": fac["name"],
-                "index": 1,
-            }
-            logger.info(f"[{sid}] Auto-selected facility: {fac['name']}")
-
-            response_text += f"**{selected['name']}** is available at **{fac['name']}**.\n"
-            response_text += "Let me check the available slots…\n\n"
-
-            return await self._fetch_and_show_slots(sid, session, response_text)
-        else:
-            # Multiple facilities → ask user to choose
-            lines = [f"**{selected['name']}** is available at multiple locations:\n"]
-            for fac in facilities:
-                addr = fac.get("address", "")
-                lines.append(f"  {fac['index']}. {fac['name']}" + (f" — {addr}" if addr else ""))
-            lines.append("\nWhich facility would you like to visit? (Enter the number)")
-
-            session["stage"] = "facility_shown"
-            response_text += "\n".join(lines)
-            return self._reply(sid, response_text)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # HELPER: Show all doctors (original flow, no symptom filtering)
-    # ══════════════════════════════════════════════════════════════════════════
-
-    async def _show_all_doctors(self, sid: str, session: Dict, prefix: str = "") -> Dict:
-        """Fetch and show all doctors (original non-symptom flow)."""
-        response_text = prefix + "Fetching all available doctors…\n\n"
-
-        raw = await mcp_get_doctors_list()
+        raw = await mcp_get_doctors_list(facility_id=selected["facilityId"])
         data = json.loads(raw)
 
         if not data.get("success") or not data.get("doctors"):
-            return self._reply(sid, "⚠️ No doctors are available at the moment. Please try again later.")
+            # Stay in facilities_shown stage so yes/no handling works
+            session["stage"] = "facilities_shown"
+            return self._reply(
+                sid,
+                f"⚠️ No doctors available at **{selected['name']}** right now.\n\n"
+                f"Would you like to choose another hospital? (Yes/No)"
+            )
 
         doctors = data["doctors"]
-        session["doctors_data"] = doctors
+        session["facility_doctors_data"] = doctors
 
-        lines = ["Here are all available doctors:\n"]
+        lines = [f"👨‍⚕️ **Doctors at {selected['name']}:**\n"]
         for doc in doctors:
-            lines.append(f"  {doc['index']}. {doc['name']}")
+            lines.append(f"  {doc['index']}. **{doc['name']}**")
 
-        lines.append("\nWhich doctor would you like to book with? (Enter the number)")
+        lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("Which doctor would you like to book with? (Enter the number)")
 
-        session["stage"] = "doctors_shown"
+        session["stage"] = "facility_doctors_shown"
         response_text += "\n".join(lines)
         return self._reply(sid, response_text)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STAGE: doctors_shown — User selects a doctor → MCP Tool 2
+    # STAGE: facility_doctors_shown — User selects doctor at chosen facility
     # ══════════════════════════════════════════════════════════════════════════
 
-    async def _handle_doctor_selection(self, sid: str, session: Dict, msg: str) -> Dict:
-        doctors = session.get("doctors_data", [])
+    async def _handle_facility_doctor_selection(self, sid: str, session: Dict, msg: str) -> Dict:
+        """User selected a doctor from the per-facility list. Fetch slots."""
+        doctors = session.get("facility_doctors_data", [])
+        msg_low = msg.strip().lower()
 
-        # Try to parse a number selection
+        # ── Handle yes/no responses (when bot asked "try another doctor/hospital?") ──
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay)\b', msg_low):
+            return await self._show_facilities(sid, session, "No problem! Let me show you the hospitals again.\n\n")
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(
+                sid,
+                "No worries! Sorry we couldn't find a suitable doctor. "
+                "Feel free to come back anytime. Have a great day! 🙏"
+            )
+
         digit_match = re.search(r'^\s*(\d+)\s*$', msg)
         if digit_match:
             index = int(digit_match.group(1))
             selected = next((d for d in doctors if d["index"] == index), None)
         else:
-            # Try to match by name
-            msg_low = msg.strip().lower()
             selected = next(
                 (d for d in doctors if msg_low in d.get("name", "").lower()),
                 None
@@ -604,63 +564,146 @@ class AppointmentAgent:
             "name": selected["name"],
             "index": selected["index"],
         }
-        logger.info(f"[{sid}] Doctor selected: {selected['name']}")
+        facility = session["selected_facility"]
+        logger.info(f"[{sid}] Doctor selected: {selected['name']} at {facility['name']}")
 
-        # ── MCP Tool 2: get_doctor_facilities ────────────────────────────
-        response_text = f"Checking available locations for **{selected['name']}**…\n\n"
+        response_text = f"Fetching available slots for **{selected['name']}** at **{facility['name']}**…\n\n"
+        return await self._fetch_and_show_slots(sid, session, response_text)
 
-        raw = await mcp_get_doctor_facilities(
-            health_professional_id=selected["healthProfessionalId"]
-        )
+    # ══════════════════════════════════════════════════════════════════════════
+    # SCENARIO 2: Doctor name search
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_doctor_name_search(self, sid: str, session: Dict, doctor_name: str) -> Dict:
+        """Search for a doctor by name across all facilities."""
+        response_text = f"🔍 Searching for **Dr. {doctor_name}** across all hospitals…\n\n"
+
+        raw = await mcp_search_doctor_by_name(doctor_name=doctor_name)
         data = json.loads(raw)
 
-        if not data.get("success") or not data.get("facilities"):
-            return self._reply(sid, f"⚠️ No facilities found for {selected['name']}. Please try another doctor.")
+        if not data.get("success") or data.get("doctorCount", 0) == 0:
+            return self._reply(
+                sid,
+                f"⚠️ Could not find a doctor matching **\"{doctor_name}\"**.\n\n"
+                "Would you like to:\n"
+                "- Try a different name\n"
+                "- Type **\"appointment\"** to browse hospitals"
+            )
 
-        facilities = data["facilities"]
-        session["facilities_data"] = facilities
+        doctors = data["doctors"]
+        
+        # Deduplicate by healthProfessionalId
+        unique_docs_map = {}
+        for d in doctors:
+            if d["healthProfessionalId"] not in unique_docs_map:
+                unique_docs_map[d["healthProfessionalId"]] = d
+        unique_docs = list(unique_docs_map.values())
+        for i, d in enumerate(unique_docs, 1):
+            d["index"] = i
+            
+        session["doctor_search_results"] = unique_docs
 
-        if len(facilities) == 1:
-            # ── Auto-select single facility, immediately fetch availability ──
-            fac = facilities[0]
-            session["selected_facility"] = {
-                "facilityId": fac["facilityId"],
-                "name": fac["name"],
-                "index": 1,
-            }
-            logger.info(f"[{sid}] Auto-selected facility: {fac['name']}")
-
-            response_text += f"**{selected['name']}** is available at **{fac['name']}**.\n"
-            response_text += "Let me check the available slots…\n\n"
-
-            # ── MCP Tool 3: get_doctor_availability (auto-chained) ───────
-            return await self._fetch_and_show_slots(sid, session, response_text)
-
-        else:
-            # Multiple facilities → ask user to choose
-            lines = [f"**{selected['name']}** is available at multiple locations:\n"]
-            for fac in facilities:
-                addr = fac.get("address", "")
-                lines.append(f"  {fac['index']}. {fac['name']}" + (f" — {addr}" if addr else ""))
-            lines.append("\nWhich facility would you like to visit? (Enter the number)")
-
-            session["stage"] = "facility_shown"
+        if len(unique_docs) > 1:
+            # Show list of unique doctor names
+            lines = [f"✅ Found **{len(unique_docs)} doctors** matching \"{doctor_name}\":\n"]
+            for doc in unique_docs:
+                lines.append(f"  {doc['index']}. **{doc['name']}**")
+            
+            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("Which doctor would you like to book with? (Enter the number)")
+            
+            session["stage"] = "doctor_search_results_shown"
             response_text += "\n".join(lines)
             return self._reply(sid, response_text)
+        else:
+            # Exactly 1 doctor matched
+            doctor = unique_docs[0]
+            session["selected_doctor"] = {
+                "healthProfessionalId": doctor["healthProfessionalId"],
+                "name": doctor["name"],
+                "index": 1,
+            }
+            logger.info(f"[{sid}] Single doctor match: {doctor['name']}")
+            prefix = response_text + f"✅ Found **{doctor['name']}**.\n"
+            
+            # Now fetch facilities for this doctor
+            return await self._check_doctor_facilities_and_proceed(
+                sid, session, doctor["healthProfessionalId"], doctor["name"], prefix
+            )
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STAGE: facility_shown — User selects a facility → MCP Tool 3
+    # STAGE: doctor_search_results_shown — User selects doctor+facility combo
     # ══════════════════════════════════════════════════════════════════════════
 
-    async def _handle_facility_selection(self, sid: str, session: Dict, msg: str) -> Dict:
-        facilities = session.get("facilities_data", [])
+    async def _handle_doctor_search_selection(self, sid: str, session: Dict, msg: str) -> Dict:
+        """User selected a doctor from the name search results. Now fetch their facilities."""
+        doctors = session.get("doctor_search_results", [])
+        msg_low = msg.strip().lower()
+
+        # ── Handle yes/no responses (when bot asked "try another?") ──
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay)\b', msg_low):
+            return await self._show_facilities(sid, session, "No problem! Let me show you the hospitals instead.\n\n")
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(
+                sid,
+                "No worries! Sorry we couldn't find what you were looking for. "
+                "Feel free to come back anytime. Have a great day! 🙏"
+            )
+
+        digit_match = re.search(r'^\s*(\d+)\s*$', msg)
+        if digit_match:
+            index = int(digit_match.group(1))
+            selected = next((d for d in doctors if d["index"] == index), None)
+        else:
+            selected = next(
+                (d for d in doctors if msg_low in d.get("name", "").lower()),
+                None
+            )
+
+        if not selected:
+            return self._reply(
+                sid,
+                f"Please enter a valid number between 1 and {len(doctors)}, "
+                f"or type **yes** to browse hospitals instead."
+            )
+
+        # Set doctor from the selection
+        session["selected_doctor"] = {
+            "healthProfessionalId": selected["healthProfessionalId"],
+            "name": selected["name"],
+            "index": selected["index"],
+        }
+        
+        prefix = f"✅ Selected **{selected['name']}**.\n"
+        return await self._check_doctor_facilities_and_proceed(
+            sid, session, selected["healthProfessionalId"], selected["name"], prefix
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: doctor_facilities_shown — Doctor found in multiple facilities
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_doctor_facility_selection(self, sid: str, session: Dict, msg: str) -> Dict:
+        """Doctor works at multiple facilities, user selects one."""
+        facilities = session.get("doctor_search_results_facilities", [])
+        msg_low = msg.strip().lower()
+
+        # ── Handle yes/no responses ──
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay)\b', msg_low):
+            return await self._show_facilities(sid, session, "No problem! Let me show you all hospitals.\n\n")
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(
+                sid,
+                "No worries! Feel free to come back anytime. Have a great day! 🙏"
+            )
 
         digit_match = re.search(r'^\s*(\d+)\s*$', msg)
         if digit_match:
             index = int(digit_match.group(1))
             selected = next((f for f in facilities if f["index"] == index), None)
         else:
-            msg_low = msg.strip().lower()
             selected = next(
                 (f for f in facilities if msg_low in f.get("name", "").lower()),
                 None
@@ -677,14 +720,58 @@ class AppointmentAgent:
             "name": selected["name"],
             "index": selected["index"],
         }
-        logger.info(f"[{sid}] Facility selected: {selected['name']}")
+        doctor = session["selected_doctor"]
+        logger.info(f"[{sid}] Facility selected for Dr. {doctor['name']}: {selected['name']}")
 
-        response_text = f"Fetching available slots at **{selected['name']}**…\n\n"
-
-        # ── MCP Tool 3: get_doctor_availability ──────────────────────────
+        response_text = f"Fetching available slots for **Dr. {doctor['name']}** at **{selected['name']}**…\n\n"
         return await self._fetch_and_show_slots(sid, session, response_text)
 
-    # ── Helper: Fetch availability and display slots ─────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # SCENARIO 3: SYMPTOM FLOW — AI-powered, searches ALL facilities
+    # ══════════════════════════════════════════════════════════════════════════
+
+
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Fetch facilities for a selected doctor and route dynamically
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _check_doctor_facilities_and_proceed(self, sid: str, session: Dict, hp_id: str, doctor_name: str, prefix_text: str) -> Dict:
+        """Called when a single doctor is selected by name. Finds their actual facilities."""
+        raw_facs = await mcp_get_doctor_facilities(health_professional_id=hp_id)
+        data_facs = json.loads(raw_facs)
+        
+        if not data_facs.get("success") or data_facs.get("count", 0) == 0:
+            return self._reply(
+                sid, f"{prefix_text}\n⚠️ This doctor is not currently assigned to any available hospitals."
+            )
+            
+        facilities = data_facs["facilities"]
+        if len(facilities) > 1:
+            session["doctor_search_results_facilities"] = facilities
+            session["stage"] = "doctor_facilities_shown"
+            
+            lines = [f"{prefix_text}**Dr. {doctor_name}** works at **{len(facilities)} hospitals**. Please select one:\n"]
+            for fac in facilities:
+                lines.append(f"  {fac['index']}. 🏥 **{fac['name']}**")
+                    
+            lines.append("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            lines.append("Which hospital would you like to visit? (Enter the number)")
+            return self._reply(sid, "\n".join(lines))
+        else:
+            # Doctor is at exactly 1 facility
+            fac = facilities[0]
+            session["selected_facility"] = {
+                "facilityId": fac["facilityId"],
+                "name": fac["name"],
+                "index": 1,
+            }
+            prefix_text += f"🏥 Doctor is available at **{fac['name']}**.\nFetching available slots…\n\n"
+            return await self._fetch_and_show_slots(sid, session, prefix_text)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Helper: Fetch availability and display slots
+    # ══════════════════════════════════════════════════════════════════════════
 
     async def _fetch_and_show_slots(self, sid: str, session: Dict, prefix: str) -> Dict:
         """Calls MCP Tool 3 and formats the time slots for display."""
@@ -698,10 +785,12 @@ class AppointmentAgent:
         data = json.loads(raw)
 
         if not data.get("success") or data.get("totalSlots", 0) == 0:
+            # Go back to facility_doctors_shown so yes/no handling works
+            session["stage"] = "facility_doctors_shown"
             return self._reply(
                 sid,
-                f"{prefix}⚠️ No available slots found for **{doctor['name']}** at **{facility['name']}**. "
-                f"Would you like to try a different doctor?"
+                f"{prefix}⚠️ No available slots found for **{doctor['name']}** at **{facility['name']}**.\n\n"
+                f"Would you like to choose another hospital or doctor? (Yes/No)"
             )
 
         availability = data["availability"]
@@ -749,6 +838,18 @@ class AppointmentAgent:
 
     async def _handle_slot_selection(self, sid: str, session: Dict, msg: str) -> Dict:
         flat_slots = session.get("flat_slots", [])
+        msg_low = msg.strip().lower()
+
+        # ── Handle yes/no responses (when bot asked "try different slot/doctor?") ──
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay)\b', msg_low):
+            return await self._show_facilities(sid, session, "No problem! Let me show you the hospitals again.\n\n")
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(
+                sid,
+                "No worries! Sorry we couldn't find a suitable slot. "
+                "Feel free to come back anytime. Have a great day! 🙏"
+            )
 
         digit_match = re.search(r'^\s*(\d+)\s*$', msg)
         if not digit_match:
@@ -770,11 +871,9 @@ class AppointmentAgent:
         missing = _missing_patient_fields(session["patient"])
 
         if not missing:
-            # All patient details already available → go to confirmation
             session["stage"] = "confirm"
             return self._show_confirmation(sid, session)
         else:
-            # Need patient details
             session["stage"] = "patient_collection"
             response = (
                 f"Great! You selected: **{selected['date']}** at **{selected['startTime']} – {selected['endTime']}** "
@@ -800,7 +899,28 @@ class AppointmentAgent:
         if missing:
             return self._reply(sid, self._ask_for_missing_fields(session["patient"]))
         else:
-            # All fields collected → go to confirmation
+            # Ensure the user doesn't use the exact same patient details again
+            current = session["patient"]
+            for prev in session.get("previous_patients", []):
+                if (current.get("firstName") == prev.get("firstName") and
+                    current.get("lastName") == prev.get("lastName") and
+                    current.get("mobile") == prev.get("mobile") and
+                    current.get("birthDate") == prev.get("birthDate")):
+                    
+                    # Clear the duplicated details and ask for new ones
+                    session["patient"] = {
+                        "firstName": None, "lastName": None, "mobile": None, 
+                        "gender": None, "birthDate": None, "address": None, 
+                        "pinCode": None, "area": None
+                    }
+                    return self._reply(
+                        sid, 
+                        f"⚠️ An appointment is already booked for **{current.get('firstName')} {current.get('lastName')}** ({current.get('mobile')}).\n\n"
+                        "If you wish to book another appointment, it must be for a different **family member**.\n"
+                        "Please provide their new details (Name, Mobile, DOB, etc)."
+                    )
+
+            # All fields collected and valid → go to confirmation
             session["stage"] = "confirm"
             return self._show_confirmation(sid, session)
 
@@ -868,7 +988,7 @@ class AppointmentAgent:
                 facility_id=facility["facilityId"],
                 slot_date=slot["date"],
                 slot_start_time=slot["startTime"],
-                symptoms=["General consultation"],
+                symptoms=session.get("symptoms", ["General consultation"]),
                 middle_name="",
                 pin_code=patient.get("pinCode", ""),
                 address=patient.get("address", ""),
@@ -886,23 +1006,163 @@ class AppointmentAgent:
                     f"🏥 **Facility:** {facility['name']}\n"
                     f"📅 **Date:** {slot['date']}\n"
                     f"⏰ **Time:** {slot['startTime']} – {slot['endTime']}\n\n"
-                    "Please arrive 10 minutes early. See you there! 🙏"
+                    "Please arrive 10 minutes early. See you there! 🙏\n\n"
+                    "Would you like to book another appointment? (Yes/No)"
                 )
                 return self._reply(sid, success_msg, booked=True)
             else:
                 error = data.get("error", "Unknown error")
-                return self._reply(
-                    sid,
-                    f"❌ Booking failed: {error}\n\n"
-                    "Would you like to try a different time slot, or shall I retry?"
-                )
+                error_msg = str(error)
+                try:
+                    if isinstance(error, str):
+                        match = re.search(r'\[.*\]|\{.*\}', error)
+                        if match:
+                            parsed = json.loads(match.group(0))
+                            if isinstance(parsed, list):
+                                error_msg = " ".join([str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in parsed])
+                            elif isinstance(parsed, dict):
+                                error_msg = str(parsed.get("message", parsed))
+                        else:
+                            error_msg = re.sub(r'^HTTP \d+:?\s*', '', error).strip()
+                    elif isinstance(error, list):
+                        error_msg = " ".join([str(e.get("message", e)) if isinstance(e, dict) else str(e) for e in error])
+                except Exception:
+                    pass
+
+                error_msg_lower = error_msg.lower()
+                is_duplicate = "already have an appointment" in error_msg_lower or "a1_appointment_008" in error_msg_lower
+
+                if is_duplicate:
+                    session["stage"] = "booking_failed_duplicate"
+                    reply_text = (
+                        f"❌ Booking failed: {error_msg}\n\n"
+                        "You have already booked an appointment. You **cannot** book another appointment for yourself using the same Name, DOB, and Mobile number.\n\n"
+                        "If you need to book an appointment for a **family member**, you can proceed. "
+                        "Would you like to start a booking for a family member? (Yes/No)"
+                    )
+                else:
+                    session["stage"] = "booking_failed"
+                    reply_text = (
+                        f"❌ Booking failed: {error_msg}\n\n"
+                        "Would you like to try a different time slot? (Yes/No)"
+                    )
+
+                return self._reply(sid, reply_text)
 
         except Exception as e:
             logger.error(f"[{sid}] Booking error: {e}", exc_info=True)
+            session["stage"] = "booking_failed"
             return self._reply(
                 sid,
-                f"❌ Something went wrong: {e}\n\nWould you like to try again?"
+                f"❌ Something went wrong: {e}\n\nWould you like to try a different time slot? (Yes/No)"
             )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: booking_failed — Handle user response after error
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_booking_failed(self, sid: str, session: Dict, msg: str) -> Dict:
+        msg_low = msg.strip().lower()
+
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay|retry|different|slot)\b', msg_low):
+            doctor = session.get("selected_doctor", {})
+            facility = session.get("selected_facility", {})
+            prefix = f"Let's try picking a different time slot for **{doctor.get('name')}** at **{facility.get('name')}**...\n\n"
+            return await self._fetch_and_show_slots(sid, session, prefix)
+
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(sid, "Booking cancelled. How else can I help you today?")
+
+        return self._reply(
+            sid,
+            "Please type **Yes** to try a different time slot, or **No** to cancel."
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: booking_failed_duplicate — Handle duplicate error response
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_booking_failed_duplicate(self, sid: str, session: Dict, msg: str) -> Dict:
+        msg_low = msg.strip().lower()
+
+        if re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay|family|proceed|start|new)\b', msg_low):
+            # Save the failing patient to previous_patients list so we reject it later if they try again
+            past_patients = session.get("previous_patients", [])
+            current_patient = session.get("patient", {}).copy()
+            if current_patient and current_patient not in past_patients:
+                past_patients.append(current_patient)
+
+            session_manager.reset(sid)
+            new_session = session_manager.get(sid)
+            new_session["previous_patients"] = past_patients
+            
+            return self._reply(
+                sid,
+                "Great! Let's book a new appointment for your family member.\n"
+                "Please remember to provide their distinct details (Name, Mobile, DOB) when asked.\n\n"
+                "I can help you book a doctor's appointment! 🏥\n\n"
+                "You can:\n"
+                "1️⃣ **Search by doctor name** — _\"Dr. Dhruv Barot\"_\n"
+                "2️⃣ **Browse hospitals** — type **\"appointment\"** or **\"book\"**\n"
+            )
+
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(sid, "Booking cancelled. How else can I help you today?")
+
+        return self._reply(
+            sid,
+            "Please type **Yes** to book for a family member, or **No** to cancel."
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # STAGE: booked — Appointment already booked, handle rebooking
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_booked(self, sid: str, session: Dict, msg: str) -> Dict:
+        """Handle user input after a successful booking. Allow rebooking."""
+        msg_low = msg.strip().lower()
+
+        # User wants to book another appointment
+        book_again = (
+            re.search(r'\b(yes|yeah|yup|ha|haa|haan|sure|ok|okay|new|reset|book|appointment|another)\b', msg_low)
+        )
+        if book_again:
+            # Save the booked patient to previous_patients list
+            past_patients = session.get("previous_patients", [])
+            current_patient = session.get("patient", {}).copy()
+            if current_patient and current_patient not in past_patients:
+                past_patients.append(current_patient)
+
+            session_manager.reset(sid)
+            new_session = session_manager.get(sid)
+            new_session["previous_patients"] = past_patients
+            
+            logger.info(f"[{sid}] Rebooking — reset session, enforcing different patient details")
+            return await self._show_facilities(
+                sid, new_session,
+                "✅ Your appointment is already booked.\n\n"
+                "If you want to book an appointment for a **family member**, we can proceed! "
+                "However, you cannot use the same Name, Mobile, and DOB as before.\n\n"
+                "Let's start by selecting a hospital for them:\n\n"
+            )
+
+        # User doesn't want to book again
+        if re.search(r'\b(no|nahi|nope|cancel|naa|exit|quit|bye|thanks|thank)\b', msg_low):
+            session_manager.reset(sid)
+            return self._reply(
+                sid,
+                "Thank you for using AarogyaOne! 🙏\n\n"
+                "Have a great day and take care! Feel free to come back anytime."
+            )
+
+        # Unrecognized input — prompt clearly
+        return self._reply(
+            sid,
+            "Your appointment is already booked! ✅\n\n"
+            "Would you like to book another appointment? (Yes/No)"
+        )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # Helpers

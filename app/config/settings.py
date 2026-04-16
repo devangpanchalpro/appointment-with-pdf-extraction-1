@@ -9,7 +9,7 @@ from pydantic import ConfigDict  # Ensure ConfigDict is imported
 class Settings(BaseSettings):
     model_config = ConfigDict(extra='ignore', env_file=".env", env_file_encoding="utf-8")  # Load from .env file
     # Environment
-    ENVIRONMENT: str = "dev"  # dev or prod
+    ENVIRONMENT: str = "prod"  # dev or prod
 
     # App
     APP_NAME: str = "Medical Appointment Booking Agent"
@@ -42,13 +42,14 @@ class Settings(BaseSettings):
     # JWT_EXPIRE_MINUTES: int = 60
 
     # External Hospital API — replace with your real API
-    EXTERNAL_API_BASE_URL_DEV: str = "https://dev-hmis-api.aarogya.one/api/v1"
-    EXTERNAL_API_BASE_URL_PROD: str = "https://beta-hmis.aarogya.one/api/v1"
+    EXTERNAL_API_BASE_URL_DEV: str = "https://hmis-api.aarogya.one/api/v1"
+    EXTERNAL_API_BASE_URL_PROD: str = "https://hmis.aarogya.one/api/v1"
     EXTERNAL_API_KEY_DEV: Optional[str] = None
     EXTERNAL_API_KEY_PROD: Optional[str] = None
     EXTERNAL_API_TIMEOUT: int = 30
 
     # API Endpoint paths
+    FACILITIES_LIST_ENDPOINT: str = "/facilities"
     DOCTORS_LIST_ENDPOINT: str = "/doctors"
     DOCTOR_FACILITIES_ENDPOINT: str = "/doctors"  # /{id}/facilities appended dynamically
     DOCTORS_AVAILABILITY_ENDPOINT: str = "/doctors/availability"
@@ -67,8 +68,7 @@ class Settings(BaseSettings):
             return self.EXTERNAL_API_KEY_PROD
         return self.EXTERNAL_API_KEY_DEV
 
-    # Default facility ID (required — Aarogya API needs this for doctor queries)
-    DEFAULT_FACILITY_ID: str = "crmpo1ob0004991hpkvg"  # Tara Hospital default
+
 
     # FastAPI
     FASTAPI_HOST: str = "0.0.0.0"

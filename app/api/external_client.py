@@ -26,8 +26,37 @@ class AarogyaAPIClient:
         self.headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
-            "x-api-key": self.api_key,
+            "X-Api-Key": self.api_key,
         }
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # 0. GET /facilities — List all facilities/hospitals
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def get_facilities_list(self) -> List[Dict[str, Any]]:
+        """
+        GET /facilities
+        Returns list of all facilities/hospitals with facilityId, name, location, etc.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                url = f"{self.base_url}{settings.FACILITIES_LIST_ENDPOINT}"
+                logger.info(f"API GET: {url}")
+                response = await client.get(url, headers=self.headers)
+                response.raise_for_status()
+                data = response.json()
+
+                logger.info(f"GET /facilities response keys: {list(data.keys()) if isinstance(data, dict) else 'list'}")
+
+                if isinstance(data, dict) and "result" in data:
+                    return data["result"]
+                elif isinstance(data, list):
+                    return data
+                else:
+                    return []
+        except Exception as e:
+            logger.error(f"API Error (get_facilities_list): {str(e)}")
+            return []
 
     # ══════════════════════════════════════════════════════════════════════════
     # 1. GET /doctors — List doctors at a facility
@@ -35,19 +64,22 @@ class AarogyaAPIClient:
 
     async def get_doctors_list(
         self,
-        facility_id: str,
-        page_size: int = 20,
+        facility_id: Optional[str] = None,
+        page_size: int = 1000,
         skip_count: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         GET /doctors?FacilityId=...&PageSize=...&SkipCount=...
+        FacilityId is optional — if omitted, returns ALL doctors across all facilities.
         Returns list of doctor objects with name, healthProfessionalId, etc.
         """
-        params = {
-            "FacilityId": facility_id,
+        params: Dict[str, Any] = {
             "PageSize": page_size,
             "SkipCount": skip_count,
         }
+        # Only add FacilityId if provided
+        if facility_id:
+            params["FacilityId"] = facility_id
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 url = f"{self.base_url}{settings.DOCTORS_LIST_ENDPOINT}"
@@ -113,10 +145,10 @@ class AarogyaAPIClient:
         from_date: Optional[str] = None,
         to_date: Optional[str] = None,
         health_professional_id: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         GET /doctors/availability
-        Returns list of doctors with their available time slots.
+        Returns RAW API response without any parsing.
         """
         if not from_date:
             from_date = datetime.now().strftime("%Y-%m-%d")
@@ -137,30 +169,11 @@ class AarogyaAPIClient:
                 response = await client.get(url, headers=self.headers, params=params)
                 response.raise_for_status()
                 data = response.json()
-
-                logger.info(f"GET /doctors/availability response: {str(data)[:200]}")
-
-                if isinstance(data, dict) and "result" in data:
-                    doctors = []
-                    for date_entry in data["result"]:
-                        for dept in date_entry.get("departments", []):
-                            for hp in dept.get("healthProfessionals", []):
-                                doctor = {
-                                    "healthProfessionalId": hp["healthProfessionalId"],
-                                    "healthProfessionalName": hp["healthProfessionalName"],
-                                    "department": dept["name"],
-                                    "appointmentDate": date_entry["appointmentDate"],
-                                    "schedule": hp["schedule"]
-                                }
-                                doctors.append(doctor)
-                    return doctors
-                elif isinstance(data, list):
-                    return data
-                else:
-                    return []
+                logger.info(f"GET /doctors/availability raw response: {str(data)[:500]}")
+                return data  # Return raw API response as-is
         except Exception as e:
             logger.error(f"API Error (get_doctors_availability): {str(e)}")
-            return []
+            return {}
 
     # ══════════════════════════════════════════════════════════════════════════
     # 4. POST /appointment/schedule — Book appointment
